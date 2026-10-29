@@ -16,6 +16,10 @@ run = "xmake f -m release -y && xmake -j \"${DYNAMIPS_BUILD_JOBS:-14}\" -y"
 description = "build Dynamips in debug mode"
 run = "xmake f -m debug -y && xmake -j \"${DYNAMIPS_BUILD_JOBS:-14}\" -y"
 
+[tasks."run:jit"]
+description = "build and run the standalone MIPS-to-IR playground"
+run = 'xmake build -y jit-playground && xmake run jit-playground "$@"'
+
 [tasks.test]
 description = "run the Go binding tests"
 depends = ["test:go"]
@@ -115,7 +119,7 @@ run = "xmake project -k compile_commands --lsp=clangd ."
 
 [tasks.format]
 description = "format C and C++ sources"
-run = "find bindings common stable include modules -type f \\( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cppm' \\) -print0 | xargs -0 clang-format -i"
+run = "find bindings common stable include modules src -type f \\( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cppm' \\) -print0 | xargs -0 clang-format -i"
 
 [tasks."fmt:go"]
 description = "format Go code"
