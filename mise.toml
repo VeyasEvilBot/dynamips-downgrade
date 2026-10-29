@@ -88,11 +88,11 @@ description = "check migrated helpers and I/O with strict compiler warnings"
 depends = ["compiledb"]
 run = """
 clang-tidy -p . -checks='-*,clang-analyzer-core.*,clang-analyzer-cplusplus.*,clang-analyzer-deadcode.*,clang-analyzer-unix.*,bugprone-use-after-move' -warnings-as-errors='*' \
-  --extra-arg=-fasm --extra-arg=-Wall --extra-arg=-Wextra \
+  --extra-arg=-Wall --extra-arg=-Wextra \
   --extra-arg=-Wpedantic --extra-arg=-Wshadow --extra-arg=-Wconversion \
   --extra-arg=-Wsign-conversion --extra-arg=-Werror --quiet \
-  common/host_memory.cpp common/rommon_var.cpp common/net_packet.cpp \
-  common/net_io_udp.cpp common/vtty_io.cpp
+  common/native_fd.cppm common/host_memory.cppm common/rommon_var.cpp common/net_packet.cppm \
+  common/net_io_udp.cppm common/vtty_io.cppm
 """
 
 [tasks."test:native"]

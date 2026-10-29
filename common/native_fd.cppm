@@ -1,4 +1,4 @@
-#pragma once
+module;
 
 #include <dynamips/macros.h>
 #include <cerrno>
@@ -9,7 +9,9 @@
 #include <unistd.h>
 #include <utility>
 
-namespace dynamips::host {
+export module native_fd;
+
+export namespace dynamips::host {
 class file_descriptor {
   int value_;
 

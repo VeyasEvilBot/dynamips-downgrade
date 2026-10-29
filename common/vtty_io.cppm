@@ -1,5 +1,10 @@
+module;
+
 #include "vtty_io.h"
-#include "native_fd.h"
+#include <dynamips/macros.h>
+#include <expected>
+#include <span>
+#include <system_error>
 
 #include <asio/io_context.hpp>
 #include <asio/executor_work_guard.hpp>
@@ -17,6 +22,21 @@
 #include <optional>
 #include <variant>
 #include <vector>
+
+export module vtty_io;
+
+import native_fd;
+
+export namespace dynamips::console {
+enum class transport { none, terminal, tcp, serial };
+fn attach(virtual_tty &owner, transport type,
+            std::span<const int> descriptors) noexcept
+    -> std::expected<void, std::error_code>;
+fn detach(virtual_tty &owner) noexcept
+    -> std::expected<void, std::error_code>;
+fn write(virtual_tty &owner, std::span<const unsigned char> bytes) noexcept
+    -> std::expected<void, std::error_code>;
+} // namespace dynamips::console
 
 namespace dynamips::console {
 namespace {
@@ -52,6 +72,7 @@ struct channel {
   int original_flags = -1;
   bool active = true;
   bool ready = false;
+  bool read_closed = false;
 
   channel(asio::io_context &context, bool tcp)
       : stream(tcp ? decltype(stream){std::in_place_type<asio::ip::tcp::socket>,
@@ -231,6 +252,13 @@ fn terminals::read(const std::shared_ptr<channel> &client) noexcept
                                      if (!client->active || !owner ||
                                          !owner->active || owner->closing)
                                        return {};
+                                     if (error == asio::error::eof) {
+                                       client->read_closed = true;
+                                       client->ready = false;
+                                       if (client->output.empty())
+                                         cancel(client);
+                                       return {};
+                                     }
                                      if (error || !size) {
                                        cancel(client);
                                        return {};
@@ -271,6 +299,8 @@ fn terminals::send(const std::shared_ptr<channel> &client) noexcept
                   client->output.pop_front();
                   if (!client->output.empty())
                     return send(client);
+                  if (client->read_closed)
+                    cancel(client);
                   return {};
                 });
                 if (!handled)
@@ -596,6 +626,8 @@ cfn vtty_io_complete(vtty_io_event *event) -> void {
       return {};
     if (input->connected)
       client->ready = true;
+    if (client->read_closed)
+      return {};
     if (let armed = state.read(client); !armed) {
       state.cancel(client);
       return armed;

@@ -29,20 +29,4 @@ int vtty_io_active(const struct vtty_io_event *);
 void vtty_io_complete(struct vtty_io_event *);
 #ifdef __cplusplus
 }
-
-#include <dynamips/macros.h>
-#include <expected>
-#include <span>
-#include <system_error>
-
-namespace dynamips::console {
-enum class transport { none, terminal, tcp, serial };
-fn attach(virtual_tty &owner, transport type,
-            std::span<const int> descriptors) noexcept
-    -> std::expected<void, std::error_code>;
-fn detach(virtual_tty &owner) noexcept
-    -> std::expected<void, std::error_code>;
-fn write(virtual_tty &owner, std::span<const unsigned char> bytes) noexcept
-    -> std::expected<void, std::error_code>;
-} // namespace dynamips::console
 #endif

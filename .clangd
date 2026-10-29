@@ -1,5 +1,5 @@
 CompileFlags:
-  Add: [-fasm, -Wall, -Wextra, -Wpedantic, -Wshadow, -Wconversion, -Iinclude, -Icommon, -Istable]
+  Add: [-Wall, -Wextra, -Wpedantic, -Wshadow, -Wconversion, -Iinclude, -Icommon, -Istable]
 ---
 If:
   PathMatch: modules/.*\.cppm

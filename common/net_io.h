@@ -8,6 +8,10 @@
 #ifndef __NET_IO_H__
 #define __NET_IO_H__
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -342,5 +346,9 @@ int netio_rxl_remove(netio_desc_t *nio);
 /* Initialize the RXL thread */
 int netio_rxl_init(void);
 void netio_rxl_shutdown(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

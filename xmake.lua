@@ -131,7 +131,7 @@ target("dynamips-core")
     add_files(
         "common/base64.cppm", "common/base64_compat.cpp",
         "common/crc.cpp", "common/hash.cpp", "common/mempool.cpp", "common/ptask.cpp",
-        "common/rbtree.cpp", "common/timer.cpp", "common/rommon_var.cpp", "common/host_memory.cpp", "common/net_packet.cpp", "common/net_io_udp.cpp", "common/vtty_io.cpp"
+        "common/native_fd.cppm", "common/rbtree.cpp", "common/timer.cpp", "common/rommon_var.cpp", "common/host_memory.cppm", "common/net_packet.cppm", "common/net_io_udp.cppm", "common/vtty_io.cppm"
     )
     add_defines("DYNAMIPS_CPP_HOST_MEMORY", "DYNAMIPS_CPP_PACKET", "DYNAMIPS_ASIO_VTTY")
     add_files("common/registry.cppm", { public = true })

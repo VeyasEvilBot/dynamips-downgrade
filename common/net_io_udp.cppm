@@ -1,5 +1,9 @@
+module;
+
 #include "net_io_udp.h"
-#include "native_fd.h"
+#include <dynamips/macros.h>
+#include <expected>
+#include <system_error>
 
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
@@ -15,10 +19,19 @@
 #include <optional>
 #include <thread>
 
-extern "C" {
 #include "net_io.h"
 #include "net.h"
-}
+
+export module net_io_udp;
+
+import native_fd;
+
+export namespace dynamips::nio {
+fn listen_udp(netio_desc &endpoint, netio_udp_handler handler, void *arg1,
+                void *arg2) noexcept -> std::expected<void, std::error_code>;
+fn unlisten_udp(netio_desc &endpoint, bool all = false) noexcept
+    -> std::expected<void, std::error_code>;
+} // namespace dynamips::nio
 
 namespace dynamips::nio {
 namespace {
@@ -162,12 +175,11 @@ fn receivers::arm(const std::shared_ptr<listener> &entry) noexcept -> result {
                 }
                 if (!entry->active || burst == 15)
                   break;
-                const let received = recvfrom(
-                    entry->socket.native_handle(), entry->buffer.data(),
-                    entry->buffer.size(), MSG_DONTWAIT, nullptr, nullptr);
-                if (received < 0)
+                std::error_code received;
+                size = entry->socket.receive_from(asio::buffer(entry->buffer),
+                                                  entry->sender, 0, received);
+                if (received)
                   break;
-                size = static_cast<std::size_t>(received);
               }
             }
             if (entry->active)
@@ -220,6 +232,9 @@ fn receivers::add(netio_desc &nio, netio_udp_handler handler, void *a,
     if (error)
       return std::unexpected(error);
     fd->release();
+    entry->socket.non_blocking(true, error);
+    if (error)
+      return std::unexpected(error);
     listeners.emplace(&nio, entry);
     if (let armed = arm(entry); !armed) {
       listeners.erase(&nio);
