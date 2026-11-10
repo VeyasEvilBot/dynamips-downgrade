@@ -6,6 +6,7 @@ module;
 #include <expected>
 #include <limits>
 #include <memory_resource>
+#include <print>
 #include <span>
 #include <utility>
 
@@ -23,6 +24,17 @@ struct instruction_word {
 
 struct guest_address {
   std::uint64_t value;
+};
+
+struct state {
+  std::array<std::uint64_t, 32> registers{};
+  guest_address pc{};
+
+  fn print() const -> void {
+    std::println("; native execution, PC={:#x}", pc.value);
+    for (std::size_t i = 0; i < registers.size(); i++)
+      std::println("r{} = {:#x}", i, registers[i]);
+  }
 };
 
 enum class error_code {

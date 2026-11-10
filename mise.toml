@@ -17,8 +17,12 @@ description = "build Dynamips in debug mode"
 run = "xmake f -m debug -y && xmake -j \"${DYNAMIPS_BUILD_JOBS:-14}\" -y"
 
 [tasks."run:jit"]
-description = "build and run the standalone MIPS-to-IR playground"
+description = "build and run the standalone MIPS-to-native playground"
 run = 'xmake build -y jit-playground && xmake run jit-playground "$@"'
+
+[tasks."test:jit"]
+description = "compare native JIT execution with MIPS register semantics"
+run = "xmake build -y jit-test && xmake run jit-test"
 
 [tasks.test]
 description = "run the Go binding tests"
@@ -115,11 +119,11 @@ PKG_CONFIG_PATH="$PWD/build/install/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG
 [tasks.compiledb]
 description = "generate clangd compile commands for C and C++ sources"
 depends = ["build:native"]
-run = "xmake project -k compile_commands --lsp=clangd ."
+run = "xmake build -y jit-playground jit-test dynamips-module-test && xmake project -k compile_commands --lsp=clangd ."
 
 [tasks.format]
 description = "format C and C++ sources"
-run = "find bindings common stable include modules src -type f \\( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cppm' \\) -print0 | xargs -0 clang-format -i"
+run = "find bindings common stable include modules src tests -type f \\( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cppm' \\) -print0 | xargs -0 clang-format -i"
 
 [tasks."fmt:go"]
 description = "format Go code"

@@ -13,6 +13,7 @@
 
 import jit.ir;
 import jit.mips64;
+import jit.amd64;
 
 namespace {
 namespace ir = jit::ir;
@@ -58,6 +59,31 @@ fn run(std::span<const mips::instruction_word> words) -> int {
     return 1;
   }
   translated->print("after optimization");
+  let compiler = jit::amd64::compiler::create();
+  if (!compiler) {
+    std::println(stderr, "jit: {}", jit::amd64::message(compiler.error()));
+    return 1;
+  }
+  alignas(std::max_align_t) std::array<std::byte, 64 * 1024> native_storage;
+  std::pmr::monotonic_buffer_resource scratch{native_storage.data(),
+                                              native_storage.size(),
+                                              std::pmr::null_memory_resource()};
+  let native = compiler->compile(*translated, scratch);
+  if (!native) {
+    const let error = native.error();
+    std::println(stderr, "jit: {} at node {}", jit::amd64::message(error),
+                 error.node_index);
+    return 1;
+  }
+  mips::state state{};
+  state.pc = start;
+  let executed = native->run(state.registers);
+  if (!executed) {
+    std::println(stderr, "jit: {}", jit::amd64::message(executed.error()));
+    return 1;
+  }
+  state.pc.value = *executed;
+  state.print();
   return 0;
 }
 } // namespace
@@ -67,7 +93,9 @@ fn main(int argc, char **argv) -> int {
     if (argc == 2 && std::string_view{argv[1]} == "--help") {
       std::println(
           "Usage: jit-playground [HEX_WORD ...]\n"
-          "With no words, translate the built-in register-only example.\n"
+          "Translate, optimize and execute register-only MIPS instructions.\n"
+          "With no words, run the built-in example. Initial registers are "
+          "zero.\n"
           "Example: jit-playground 3401002a 3402000f 00221826 0062202d");
       return 0;
     }
