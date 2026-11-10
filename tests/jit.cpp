@@ -1,4 +1,5 @@
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -15,6 +16,7 @@ import jit.ir;
 import jit.mips64;
 import jit.amd64;
 import jit.memory;
+import jit.uart;
 
 namespace {
 namespace ir = jit::ir;
@@ -320,6 +322,87 @@ fn memory_operations() -> void {
               state[3] == 0 && ram == before,
           "faulting stores do not modify memory or later registers");
 }
+
+fn mmio_console() -> void {
+  namespace mem = jit::memory;
+  std::array<std::byte, mem::page_size> ram{};
+  jit::uart console{{0x100000}};
+  let memory = mem::address_space::create(ram, 2);
+  require(memory.has_value(), "create MMIO address space");
+  let &guest = **memory;
+  constexpr let rw = mem::permission::read | mem::permission::write;
+  require(guest.map_ram({0x2000}, {0}, rw).has_value() &&
+              guest.map_device({0x8000}, {0x100000}, console.endpoint(), rw)
+                  .has_value(),
+          "map console and RAM");
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create MMIO compiler");
+  alignas(std::max_align_t) std::array<std::byte, 64 * 1024> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{
+      mips::instruction_word{0x34018000}, mips::instruction_word{0x34020068},
+      mips::instruction_word{0xac220000}, mips::instruction_word{0x34020065},
+      mips::instruction_word{0xac220000}, mips::instruction_word{0x3402006c},
+      mips::instruction_word{0xac220000}, mips::instruction_word{0x3402006c},
+      mips::instruction_word{0xac220000}, mips::instruction_word{0x3402006f},
+      mips::instruction_word{0xac220000}, mips::instruction_word{0x3402000a},
+      mips::instruction_word{0xac220000}, mips::instruction_word{0x8c230004},
+      mips::instruction_word{0x34042000}, mips::instruction_word{0xac820000},
+      mips::instruction_word{0x8c850000}};
+  let block = mips::translate(words, {0x1000}, arena);
+  require(block.has_value() &&
+              ir::optimize(*block, ir::fold_constants).has_value(),
+          "translate and optimize MMIO program");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile MMIO program");
+  std::array<std::uint64_t, 32> state{};
+  const let result = native->run(state, guest);
+  require(
+      result && *result == 0x1044 && console.output() == "hello\n" &&
+          state[3] == 1 && state[5] == 10 &&
+          guest.load<std::uint32_t>({0x2000}) == 10,
+      "native guest writes exact console bytes, reads status and accesses RAM");
+  require(native->run(state, guest).has_value() &&
+              console.output() == "hello\nhello\n",
+          "repeated execution preserves every MMIO transaction");
+  constexpr std::array faulting{
+      mips::instruction_word{0x34018000}, mips::instruction_word{0x34020058},
+      mips::instruction_word{0xac220000}, mips::instruction_word{0x8c200000},
+      mips::instruction_word{0x34020059}, mips::instruction_word{0xac220000}};
+  let fault_block = mips::translate(faulting, {0x1000}, arena);
+  require(fault_block.has_value() &&
+              ir::optimize(*fault_block, ir::fold_constants).has_value(),
+          "translate faulting MMIO program");
+  let fault_native = compiler->compile(*fault_block, arena);
+  require(fault_native.has_value(), "compile faulting MMIO program");
+  const let failed = fault_native->run(state, guest);
+  require(
+      !failed && failed.error().pc == 0x100c &&
+          failed.error().access.reason == mem::fault_reason::bus &&
+          state[2] == 'X' && console.output() == "hello\nhello\nX",
+      "MMIO fault preserves earlier effects and suppresses later instructions");
+  require(guest.store<std::uint32_t, std::endian::little>({0x8000}, 0x21000000)
+                  .has_value() &&
+              console.output() == "hello\nhello\nX!" &&
+              guest.load<std::uint32_t, std::endian::little>({0x8004}) ==
+                  0x01000000,
+          "device register byte order is explicit");
+  const let unsupported = guest.store<std::uint16_t>({0x8000}, 1);
+  require(!unsupported &&
+              unsupported.error().reason == mem::fault_reason::unsupported_size,
+          "UART rejects unsupported access width");
+  for (std::size_t i = console.output().size(); i < jit::uart::capacity; i++)
+    require(guest.store<std::uint32_t>({0x8000}, 'A').has_value(),
+            "fill bounded console");
+  require(guest.load<std::uint32_t>({0x8004}) == 0,
+          "full UART clears ready status");
+  const let full = fault_native->run(state, guest);
+  require(!full && full.error().pc == 0x1008 &&
+              full.error().access.access == mem::access_kind::write &&
+              console.output().size() == jit::uart::capacity,
+          "full console faults without overwriting the buffer");
+}
 } // namespace
 
 fn main() -> int {
@@ -328,6 +411,7 @@ fn main() -> int {
   immediate_operands();
   observed_stores();
   memory_operations();
+  mmio_console();
   std::println(
       "jit: native lowering, differential and ownership checks passed");
 }

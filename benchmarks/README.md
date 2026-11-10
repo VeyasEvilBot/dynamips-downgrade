@@ -31,7 +31,8 @@ affected entries in all access caches. No allocation occurs on RAM hits, cache
 refills, or mapping changes within the startup capacity.
 
 This is not an architectural MIPS CP0 TLB implementation. ASIDs, segment rules,
-guest TLB instructions, precise CPU exception delivery, and JIT load/store IR
-integration remain separate work. MMIO callbacks receive the requested byte order
-and exchange numeric values once per access; scalar RAM operations support explicit big/little endianness and
+guest TLB instructions, precise architectural exception delivery, and inline JIT
+cache probing remain separate work. MMIO callbacks receive the requested byte
+order and exchange numeric values once per access; scalar RAM operations support
+explicit big/little endianness and
 natural alignment for 1, 2, 4, and 8 bytes.

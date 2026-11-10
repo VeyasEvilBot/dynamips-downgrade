@@ -54,6 +54,23 @@ migrated utility, packet, UDP and console C++ sources with strict
 conversion/pedantic warnings as errors
 and focused Clang analysis. Run `mise run compiledb` to prepare clangd.
 
+## JIT playground
+
+`mise run run:jit` runs a native-compiled MIPS program that writes `hello` through
+an MMIO console, reads its ready status, and stores and loads a RAM word.
+Use `mise run run:jit -- --dump-ir --registers` to inspect IR and final registers.
+Hexadecimal instruction words may follow the options to replace the example.
+
+The harness loads and fetches big-endian code at `0x1000`, maps data RAM at
+`0x2000`, and maps console word registers at `0x8000` (TX) and `0x8004` (ready).
+The console captures up to 1024 bytes; writing when full raises a device fault.
+Programs are straight-line blocks of at most 1024 instructions. Supported
+instructions are ORI, XOR, DADDU, LW, SW, LD and SD. Faults report the guest PC
+and address, retain earlier effects, and stop later instructions.
+
+Memory IR currently calls typed C++ helpers; inline JIT RAM-cache probing and
+architectural MIPS exceptions remain future work.
+
 ## Go consumers
 
 Native binaries are distributed as Linux amd64 GitHub release assets, not in
