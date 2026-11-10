@@ -35,8 +35,15 @@ mise run lint:go
 mise run lint:cpp
 ```
 
-`mise run test` builds the native libraries and runs the Go tests against them.
-`mise run test:native` builds and tests the C++ module. `mise run lint:cpp` runs cppcheck on the new C/C++ embedding boundary
+`mise run test` builds the native libraries and legacy executable, runs every
+registered xmake test (C++ module lifecycle, JIT and guest memory), then runs the
+Go tests against the freshly installed libraries, including legacy parity.
+Native tests print a pass/fail summary and show diagnostics on failure. Register
+new native suites with `add_tests` in their xmake target to include them here.
+Use `test:native`, `test:jit`, `test:memory` or `test:go` for a focused run;
+`test:core` runs JIT and memory together. Benchmarks remain separate, and IOS boot
+tests require `DYNAMIPS_IOS_ARCHIVE` (see `test:ios` below).
+`mise run lint:cpp` runs cppcheck on the new C/C++ embedding boundary
 and clang-tidy on `bindings/*.cpp`. It requires `clang-tidy`; mise provides
 cppcheck. The C++23 module partitions are checked by the Clang build because
 xmake's compilation database does not currently include their module commands

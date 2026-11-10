@@ -22,15 +22,30 @@ run = 'xmake build -y jit-playground && xmake run jit-playground "$@"'
 
 [tasks."test:jit"]
 description = "compare native JIT execution with MIPS register semantics"
-run = "xmake build -y jit-test && xmake run jit-test"
+run = "xmake test --output-on-failure 'jit-test/*'"
 
 [tasks.test]
-description = "run the Go binding tests"
-depends = ["test:go"]
+description = "build once and run all native and Go tests"
+depends = ["build:native"]
+quiet = true
+run = '''
+set -eu
+echo "Building the legacy integration fixture"
+xmake build -j "${DYNAMIPS_BUILD_JOBS:-14}" -y dynamips
+echo "Running native tests"
+xmake test --output-on-failure -j "${DYNAMIPS_BUILD_JOBS:-14}"
+echo "Running Go tests"
+PKG_CONFIG_PATH="$PWD/build/install/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" go test -a -count=1 ./...
+echo "All test suites passed"
+'''
+
+[tasks."test:core"]
+description = "test native JIT and guest memory together"
+run = "xmake test --output-on-failure 'jit-test/*' 'memory-test/*'"
 
 [tasks."test:memory"]
 description = "test two-level guest memory access and faults"
-run = "xmake build -y memory-test && xmake run memory-test"
+run = "xmake test --output-on-failure 'memory-test/*'"
 
 [tasks."bench:memory"]
 description = "benchmark release RAM access against the real legacy MTS callback"
@@ -114,7 +129,7 @@ clang-tidy -p . -checks='-*,clang-analyzer-core.*,clang-analyzer-cplusplus.*,cla
 [tasks."test:native"]
 description = "test the C++ module"
 depends = ["build:native"]
-run = "xmake build -j \"${DYNAMIPS_BUILD_JOBS:-14}\" -y dynamips-module-test && xmake run dynamips-module-test"
+run = "xmake test --output-on-failure 'dynamips-module-test/*'"
 
 [tasks."run:example"]
 description = "boot a C7200 image and open its IOS console"
@@ -163,4 +178,4 @@ fi
 
 [tasks.check]
 description = "Check Go policies, native contracts, and bindings"
-depends = ["lint:architecture", "lint:go", "test:go"]
+depends = ["lint:architecture", "lint:go", "test"]
