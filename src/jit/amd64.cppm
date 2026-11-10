@@ -1,8 +1,10 @@
 module;
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <memory_resource>
 #include <new>
@@ -131,6 +133,31 @@ public:
     try {
       std::pmr::vector<asmjit::x86::Gp> values{&scratch};
       values.resize(block.nodes().size());
+      std::pmr::vector<std::uint8_t> keep_store(block.nodes().size(), 0,
+                                                &scratch);
+      std::pmr::vector<std::uint8_t> observed(block.info().state_slots, 1,
+                                              &scratch);
+      for (std::size_t i = block.nodes().size(); i > 0; i--) {
+        const let &node = block.nodes()[i - 1];
+        switch (node.op) {
+        case ir::opcode::read_state:
+          observed[node.slot.index] = 1;
+          break;
+        case ir::opcode::write_state:
+          keep_store[i - 1] = observed[node.slot.index];
+          observed[node.slot.index] = 0;
+          break;
+        case ir::opcode::constant:
+        case ir::opcode::add_wrap:
+        case ir::opcode::bit_or:
+        case ir::opcode::bit_xor:
+          break;
+        default:
+          // Unclassified effects must observe all preceding state writes.
+          std::ranges::fill(observed, 1);
+          break;
+        }
+      }
       error_handler errors;
       asmjit::CodeHolder code;
       code.setErrorHandler(&errors);
@@ -147,12 +174,45 @@ public:
         return failure(errors.code, 0);
       function->setArg(0, state);
 
+      const let operand = [&](ir::value_id id)
+          -> std::expected<asmjit::x86::Gp, asmjit::Error> {
+        let &value = values[id.index];
+        const let &node = block.nodes()[id.index];
+        if (!value.isValid() && node.op == ir::opcode::constant) {
+          value = node.type == ir::width::bits64 ? output.newUInt64()
+                                                 : output.newUInt32();
+          if (errors.code)
+            return std::unexpected(errors.code);
+          if (const let status =
+                  output.mov(value, asmjit::Imm{node.data.immediate}))
+            return std::unexpected(status);
+        }
+        return value;
+      };
+      const let immediate = [&](ir::value_id id) {
+        const let &node = block.nodes()[id.index];
+        if (node.op != ir::opcode::constant)
+          return false;
+        constexpr let positive_limit = static_cast<std::uint64_t>(
+            std::numeric_limits<std::int32_t>::max());
+        return node.type == ir::width::bits32 ||
+               node.data.immediate <= positive_limit ||
+               node.data.immediate >=
+                   std::numeric_limits<std::uint64_t>::max() - positive_limit;
+      };
+
       for (std::size_t i = 0; i < block.nodes().size(); i++) {
         const let &node = block.nodes()[i];
+        if (node.op == ir::opcode::constant)
+          continue;
         if (node.op == ir::opcode::write_state) {
-          const let status =
-              output.mov(asmjit::x86::Mem{state, node.slot.index * 8, 8},
-                         values[node.data.inputs.left.index]);
+          if (!keep_store[i])
+            continue;
+          const let value = operand(node.data.inputs.left);
+          if (!value)
+            return failure(value.error(), i);
+          const let status = output.mov(
+              asmjit::x86::Mem{state, node.slot.index * 8, 8}, *value);
           if (status)
             return failure(status, i);
           continue;
@@ -165,7 +225,6 @@ public:
         asmjit::Error status = asmjit::kErrorOk;
         switch (node.op) {
         case ir::opcode::constant:
-          status = output.mov(result, asmjit::Imm{node.data.immediate});
           break;
         case ir::opcode::read_state:
           status = output.mov(result,
@@ -174,16 +233,32 @@ public:
         case ir::opcode::add_wrap:
         case ir::opcode::bit_or:
         case ir::opcode::bit_xor: {
-          status = output.mov(result, values[node.data.inputs.left.index]);
+          let left = node.data.inputs.left;
+          let right = node.data.inputs.right;
+          if (!immediate(right) && immediate(left))
+            std::swap(left, right);
+          const let left_value = operand(left);
+          if (!left_value)
+            return failure(left_value.error(), i);
+          status = output.mov(result, *left_value);
           if (status)
             break;
-          const let right = values[node.data.inputs.right.index];
-          if (node.op == ir::opcode::add_wrap)
-            status = output.add(result, right);
-          else if (node.op == ir::opcode::bit_or)
-            status = output.or_(result, right);
-          else
-            status = output.xor_(result, right);
+          const let emit = [&](const auto &right_value) {
+            if (node.op == ir::opcode::add_wrap)
+              return output.add(result, right_value);
+            if (node.op == ir::opcode::bit_or)
+              return output.or_(result, right_value);
+            return output.xor_(result, right_value);
+          };
+          if (immediate(right)) {
+            status =
+                emit(asmjit::Imm{block.nodes()[right.index].data.immediate});
+          } else {
+            const let right_value = operand(right);
+            if (!right_value)
+              return failure(right_value.error(), i);
+            status = emit(*right_value);
+          }
           break;
         }
         case ir::opcode::write_state:

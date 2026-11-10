@@ -143,10 +143,95 @@ fn ownership_and_errors() -> void {
   require(retained->run(state).has_value() && state[3] == 4 && state[4] == 2,
           "reuse native code with changed state");
 }
+
+fn immediate_operands() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create immediate compiler");
+  constexpr std::array<std::uint64_t, 8> constants{
+      0,           0x7fffffff,         0x80000000,         0xffffffff,
+      0x100000000, 0xffffffff7fffffff, 0xffffffff80000000, UINT64_MAX};
+  constexpr std::array operations{ir::binary_kind::add_wrap,
+                                  ir::binary_kind::bit_or,
+                                  ir::binary_kind::bit_xor};
+  for (const let bits : constants) {
+    for (const let operation : operations) {
+      for (unsigned side = 0; side < 2; side++) {
+        alignas(std::max_align_t) std::array<std::byte, 64 * 1024> storage;
+        std::pmr::monotonic_buffer_resource memory{
+            storage.data(), storage.size(), std::pmr::null_memory_resource()};
+        let block = ir::block::create({0x3000, 1, 4}, 5, memory);
+        require(block.has_value(), "create immediate IR");
+        const let append = [&](ir::node node) {
+          let result = block->append(node);
+          require(result.has_value(), "append immediate IR");
+          return *result;
+        };
+        const let input = append(ir::node::read({1}, 0));
+        const let constant = append(ir::node::constant(bits, 0));
+        const let result =
+            append(ir::node::binary(operation, side == 0 ? input : constant,
+                                    side == 0 ? constant : input, 0));
+        append(ir::node::write({2}, result, 0));
+        append(ir::node::write({3}, constant, 0));
+        let native = compiler->compile(*block, memory);
+        require(native.has_value(), "compile immediate boundary");
+        for (const let value : {std::uint64_t{0x123456789abcdef}, UINT64_MAX}) {
+          std::array<std::uint64_t, 4> state{0, value, 0, 0};
+          const let expected =
+              operation == ir::binary_kind::add_wrap ? value + bits
+              : operation == ir::binary_kind::bit_or ? value | bits
+                                                     : value ^ bits;
+          require(native->run(state).has_value() && state[2] == expected &&
+                      state[3] == bits,
+                  "immediate encoding and shared constant retain all bits");
+        }
+      }
+    }
+  }
+}
+
+fn observed_stores() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create store compiler");
+  for (unsigned observe = 0; observe < 3; observe++) {
+    alignas(std::max_align_t) std::array<std::byte, 64 * 1024> storage;
+    std::pmr::monotonic_buffer_resource memory{
+        storage.data(), storage.size(), std::pmr::null_memory_resource()};
+    let block = ir::block::create({0x4000, 1, 4}, 8, memory);
+    require(block.has_value(), "create store IR");
+    const let append = [&](ir::node node) {
+      let result = block->append(node);
+      require(result.has_value(), "append store IR");
+      return *result;
+    };
+    const let first = append(ir::node::constant(11, 0));
+    const let last = append(ir::node::constant(22, 0));
+    append(ir::node::write({1}, first, 0));
+    ir::value_id snapshot{};
+    if (observe != 0)
+      snapshot =
+          append(ir::node::read({static_cast<std::uint16_t>(observe)}, 0));
+    append(ir::node::write({1}, last, 0));
+    if (observe != 0)
+      append(ir::node::write({3}, snapshot, 0));
+    let native = compiler->compile(*block, memory);
+    require(native.has_value(), "compile observed stores");
+    std::array<std::uint64_t, 4> state{0, 5, 33, 0};
+    require(native->run(state).has_value() && state[1] == 22 &&
+                state[2] == 33 &&
+                state[3] == (observe == 0   ? 0u
+                             : observe == 1 ? 11u
+                                            : 33u),
+            "eliminate overwritten stores without changing observed state");
+  }
+}
 } // namespace
 
 fn main() -> int {
   differential();
   ownership_and_errors();
-  std::println("jit: native differential and ownership checks passed");
+  immediate_operands();
+  observed_stores();
+  std::println(
+      "jit: native lowering, differential and ownership checks passed");
 }
