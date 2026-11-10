@@ -27,6 +27,11 @@ struct guest_address {
   std::uint64_t value;
 };
 
+constexpr fn is_branch(instruction_word word) noexcept -> bool {
+  const let op = word.bits >> 26;
+  return op == 4 || op == 5;
+}
+
 struct state {
   std::array<std::uint64_t, 32> registers{};
   guest_address pc{};
@@ -45,6 +50,8 @@ enum class error_code {
   invalid_encoding,
   out_of_memory,
   invalid_ir,
+  missing_delay_slot,
+  branch_in_delay_slot,
 };
 
 struct error {
@@ -58,6 +65,16 @@ struct error {
     -> std::expected<ir::block, error> {
   if (start.value % 4 != 0)
     return std::unexpected(error{error_code::unaligned_pc, 0});
+  for (std::size_t i = 0; i < words.size(); i++) {
+    if (!is_branch(words[i]))
+      continue;
+    if (i + 1 == words.size())
+      return std::unexpected(error{error_code::missing_delay_slot, i});
+    if (is_branch(words[i + 1]))
+      return std::unexpected(error{error_code::branch_in_delay_slot, i + 1});
+    words = words.first(i + 2);
+    break;
+  }
   constexpr std::size_t nodes_per_instruction = 4;
   const let memory_instructions = static_cast<std::size_t>(
       std::ranges::count_if(words, [](instruction_word word) {
@@ -85,6 +102,8 @@ struct error {
   std::array<ir::value_id, 32> registers{};
   for (std::size_t i = 0; i < words.size(); i++) {
     const let bits = words[i].bits;
+    if (bits == 0)
+      continue;
     const let opcode = bits >> 26;
     const let rs = static_cast<std::uint16_t>((bits >> 21) & 31);
     const let rt = static_cast<std::uint16_t>((bits >> 16) & 31);
@@ -94,13 +113,14 @@ struct error {
     const bool load = opcode == 0x23 || opcode == 0x37;
     const bool store = opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
-    if (!immediate && !memory_access &&
+    const bool branch = is_branch(words[i]);
+    if (!immediate && !memory_access && !branch &&
         !(opcode == 0 && (function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
-    if (!immediate && !memory_access && ((bits >> 6) & 31) != 0)
+    if (!immediate && !memory_access && !branch && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = immediate || memory_access ? rt : rd;
-    if (destination == 0 && !memory_access)
+    if (destination == 0 && !memory_access && !branch)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -124,6 +144,22 @@ struct error {
     const let left = read(rs);
     if (!left)
       return failed(left.error());
+    if (branch) {
+      const let right = read(rt);
+      if (!right)
+        return failed(right.error());
+      const let displacement =
+          std::int64_t{static_cast<std::int16_t>(bits & 0xffff)} * 4;
+      const let target =
+          start.value + i * 4 + 4 + static_cast<std::uint64_t>(displacement);
+      if (let exit =
+              result.set_branch({*left, *right, target, source,
+                                 opcode == 4 ? ir::branch_kind::equal
+                                             : ir::branch_kind::not_equal});
+          !exit)
+        return failed(exit.error());
+      continue;
+    }
     if (memory_access) {
       const let offset = result.append(
           ir::node::constant(static_cast<std::uint64_t>(std::int64_t{

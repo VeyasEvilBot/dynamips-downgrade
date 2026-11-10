@@ -10,6 +10,7 @@ module;
 #include <memory>
 #include <memory_resource>
 #include <new>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -45,6 +46,7 @@ struct execution_error {
   error_code code;
   std::uint64_t pc;
   memory::fault access{};
+  std::optional<std::uint64_t> branch_pc{};
 };
 
 [[nodiscard]] fn message(error value) noexcept -> std::string_view {
@@ -79,7 +81,7 @@ public:
   compiled_block(compiled_block &&other) noexcept
       : runtime_(std::move(other.runtime_)),
         entry_(std::exchange(other.entry_, nullptr)), slots_(other.slots_),
-        uses_memory_(other.uses_memory_) {}
+        uses_memory_(other.uses_memory_), branch_pc_(other.branch_pc_) {}
 
   fn operator=(compiled_block &&other) noexcept -> compiled_block & {
     if (this != &other) {
@@ -88,6 +90,7 @@ public:
       entry_ = std::exchange(other.entry_, nullptr);
       slots_ = other.slots_;
       uses_memory_ = other.uses_memory_;
+      branch_pc_ = other.branch_pc_;
     }
     return *this;
   }
@@ -115,8 +118,9 @@ public:
     execution_context context{&memory};
     const let pc = entry_(state.data(), &context);
     if (context.failed)
-      return std::unexpected(
-          execution_error{error_code::memory_fault, pc, context.fault});
+      return std::unexpected(execution_error{
+          error_code::memory_fault, pc, context.fault,
+          branch_pc_ && pc == *branch_pc_ + 4 ? branch_pc_ : std::nullopt});
     return pc;
   }
 
@@ -157,14 +161,16 @@ private:
   }
 
   compiled_block(std::shared_ptr<asmjit::JitRuntime> runtime, entry_point entry,
-                 std::uint16_t slots, bool uses_memory) noexcept
+                 std::uint16_t slots, bool uses_memory,
+                 std::optional<std::uint64_t> branch_pc) noexcept
       : runtime_(std::move(runtime)), entry_(entry), slots_(slots),
-        uses_memory_(uses_memory) {}
+        uses_memory_(uses_memory), branch_pc_(branch_pc) {}
 
   std::shared_ptr<asmjit::JitRuntime> runtime_;
   entry_point entry_;
   std::uint16_t slots_;
   bool uses_memory_;
+  std::optional<std::uint64_t> branch_pc_;
 
   fn reset() noexcept -> void {
     // Only this owner can release the installed entry point.
@@ -416,6 +422,27 @@ public:
         return failure(errors.code, block.nodes().size());
       if (const let status = output.mov(next_pc, asmjit::Imm{block.next_pc()}))
         return failure(status, block.nodes().size());
+      if (block.branch()) {
+        const let &branch = *block.branch();
+        const let left = operand(branch.left);
+        const let right = operand(branch.right);
+        if (!left || !right)
+          return failure(!left ? left.error() : right.error(),
+                         block.nodes().size());
+        const let skip = output.newLabel();
+        if (errors.code)
+          return failure(errors.code, block.nodes().size());
+        if (const let status = output.cmp(*left, *right))
+          return failure(status, block.nodes().size());
+        if (const let status = branch.kind == ir::branch_kind::equal
+                                   ? output.jne(skip)
+                                   : output.je(skip))
+          return failure(status, block.nodes().size());
+        if (const let status = output.mov(next_pc, asmjit::Imm{branch.target}))
+          return failure(status, block.nodes().size());
+        if (const let status = output.bind(skip))
+          return failure(status, block.nodes().size());
+      }
       if (const let status = output.ret(next_pc))
         return failure(status, block.nodes().size());
       if (const let status = output.endFunc())
@@ -425,8 +452,12 @@ public:
       compiled_block::entry_point entry = nullptr;
       if (const let status = runtime_->add(&entry, &code))
         return failure(status, block.nodes().size());
-      return compiled_block{runtime_, entry, block.info().state_slots,
-                            uses_memory};
+      return compiled_block{
+          runtime_, entry, block.info().state_slots, uses_memory,
+          block.branch()
+              ? std::optional{block.info().start_pc +
+                              std::uint64_t{block.branch()->source_index} * 4}
+              : std::nullopt};
     } catch (const std::bad_alloc &) {
       return std::unexpected(error{error_code::out_of_memory});
     }

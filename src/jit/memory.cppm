@@ -126,6 +126,17 @@ public:
     return generation_;
   }
 
+  // Immutable instruction images cannot have writable physical aliases.
+  [[nodiscard]] fn seal_executable_pages() noexcept
+      -> std::expected<void, mapping_error> {
+    for (const let &entry : mappings_)
+      if (entry.host && !compatible_code(entry.address, entry.physical,
+                                         entry.permissions, true))
+        return std::unexpected(mapping_error::physical_conflict);
+    sealed_code_ = true;
+    return {};
+  }
+
   // Successful edits remain applied if a later edit fails. All invalidations
   // finish before returning; no guest access can observe an unflushed batch.
   [[nodiscard]] fn
@@ -227,6 +238,9 @@ public:
     if (found->target && (static_cast<unsigned>(permissions) &
                           static_cast<unsigned>(permission::execute)) != 0)
       return std::unexpected(mapping_error::invalid_permissions);
+    if (found->host &&
+        !compatible_code(address, found->physical, permissions, sealed_code_))
+      return std::unexpected(mapping_error::physical_conflict);
     found->permissions = permissions;
     invalidate(address);
     return {};
@@ -329,12 +343,32 @@ private:
   std::size_t mapping_limit_ = 0;
   std::uint64_t generation_ = 0;
   invalidation_batch *batch_ = nullptr;
+  bool sealed_code_ = false;
 
   explicit address_space(std::span<std::byte> ram) noexcept : ram_(ram) {}
 
   static constexpr fn valid(permission permissions) noexcept -> bool {
     const let bits = static_cast<unsigned>(permissions);
     return bits != 0 && bits <= 7;
+  }
+
+  fn compatible_code(virtual_address address, physical_address physical,
+                       permission permissions, bool enforce) const noexcept
+      -> bool {
+    if (!enforce)
+      return true;
+    const let bits = static_cast<unsigned>(permissions);
+    if ((bits & 6u) == 6u)
+      return false;
+    for (const let &entry : mappings_) {
+      if (!entry.host || entry.address.value == address.value ||
+          entry.physical.value != physical.value)
+        continue;
+      const let other = static_cast<unsigned>(entry.permissions);
+      if (((bits & 4u) && (other & 2u)) || ((bits & 2u) && (other & 4u)))
+        return false;
+    }
+    return true;
   }
 
   fn find(virtual_address address) noexcept
@@ -376,6 +410,9 @@ private:
       return std::unexpected(mapping_error::misaligned_page);
     if (!valid(value.permissions))
       return std::unexpected(mapping_error::invalid_permissions);
+    if (value.host && !compatible_code(value.address, value.physical,
+                                       value.permissions, sealed_code_))
+      return std::unexpected(mapping_error::physical_conflict);
     const let found = find(value.address);
     if (found != mappings_.end() &&
         found->address.value == value.address.value) {

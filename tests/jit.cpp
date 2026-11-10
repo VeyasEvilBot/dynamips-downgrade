@@ -18,6 +18,7 @@ import jit.amd64;
 import jit.memory;
 import jit.uart;
 import jit.example;
+import jit.dispatch;
 
 namespace {
 namespace ir = jit::ir;
@@ -404,6 +405,143 @@ fn mmio_console() -> void {
               console.output().size() == jit::uart::capacity,
           "full console faults without overwriting the buffer");
 }
+fn branches_and_dispatch() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create branch compiler");
+  for (unsigned opcode = 4; opcode <= 5; opcode++) {
+    for (unsigned different = 0; different < 2; different++) {
+      alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+      std::pmr::monotonic_buffer_resource arena{
+          storage.data(), storage.size(), std::pmr::null_memory_resource()};
+      const std::array words{
+          mips::instruction_word{(opcode << 26) | (1u << 21) | (2u << 16) | 3u},
+          mips::instruction_word{0x34010007},
+          mips::instruction_word{0x34030009}};
+      let block = mips::translate(words, {0x1000}, arena);
+      require(block && block->info().instruction_count == 2 && block->branch(),
+              "branch ends block after delay slot");
+      require(ir::optimize(*block, ir::fold_constants).has_value(),
+              "optimize branch IR");
+      let native = compiler->compile(*block, arena);
+      require(native.has_value(), "compile branch");
+      std::array<std::uint64_t, 32> state{};
+      state[1] = 5;
+      state[2] = 5 + different;
+      const let result = native->run(state);
+      const bool taken = opcode == 4 ? different == 0 : different != 0;
+      require(result && *result == (taken ? 0x1010u : 0x1008u) &&
+                  state[1] == 7 && state[3] == 0,
+              "branch compares pre-slot values and executes slot once");
+    }
+  }
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 3);
+  require(memory.has_value(), "create dispatch memory");
+  let &guest = **memory;
+  constexpr let rw = mem::permission::read | mem::permission::write;
+  constexpr let rx = mem::permission::read | mem::permission::execute;
+  require(guest.map_ram({0x1000}, {0}, rw).has_value(), "map program RAM");
+  constexpr std::array words{
+      mips::instruction_word{0x34010000}, mips::instruction_word{0x34020003},
+      mips::instruction_word{0x34040001}, mips::instruction_word{0x0024082d},
+      mips::instruction_word{0x1422fffe}, mips::instruction_word{0},
+      mips::instruction_word{0x34050063}};
+  for (std::size_t i = 0; i < words.size(); i++)
+    require(
+        guest.store<std::uint32_t>({0x1000 + i * 4}, words[i].bits).has_value(),
+        "load loop image");
+  require(guest.protect({0x1000}, rx).has_value(), "protect code");
+  require(guest.map_ram({0x2000}, {0}, rw).has_value(),
+          "create writable code alias before seal");
+  const let alias = jit::dispatcher::create(words, {0x1000}, guest);
+  require(!alias &&
+              alias.error().code == jit::dispatch_error_code::writable_code,
+          "dispatcher rejects writable executable aliases");
+  require(guest.unmap({0x2000}).has_value(), "remove code alias");
+  let program = jit::dispatcher::create(words, {0x1000}, guest);
+  require(program.has_value(), "create dispatcher");
+  mips::state state{};
+  state.pc = {0x1000};
+  const let first = (*program)->run_slice(state, 100, 1);
+  require(first && first->reason == jit::stop_reason::yielded &&
+              first->instructions == 6 && first->compiled == 1 &&
+              state.pc.value == 0x100c,
+          "dispatch yields at block boundary");
+  const let rest = (*program)->run_slice(state, 94);
+  require(rest && rest->reason == jit::stop_reason::completed &&
+              rest->instructions == 7 && rest->compiled == 2 &&
+              state.registers[1] == 3 && state.registers[5] == 99,
+          "dispatch handles backward branch and fallthrough");
+  state = {};
+  state.pc = {0x1000};
+  const let cached = (*program)->run_slice(state, 100);
+  require(cached && cached->compiled == 0 && cached->instructions == 13,
+          "warm dispatch reuses compiled blocks");
+  state = {};
+  state.pc = {0x1000};
+  const let short_budget = (*program)->run_slice(state, 5);
+  require(short_budget &&
+              short_budget->reason == jit::stop_reason::budget_exhausted &&
+              short_budget->instructions == 0 && state.pc.value == 0x1000,
+          "budget never splits a branch and delay slot");
+  require(!guest.map_ram({0x2000}, {0}, rw),
+          "sealed executable backing cannot gain writable alias");
+  require(guest.protect({0x1000}, mem::permission::read).has_value(),
+          "revoke execute access");
+  const let revoked = (*program)->run_slice(state, 100);
+  require(!revoked &&
+              revoked.error().access.reason == mem::fault_reason::permission,
+          "mapping changes invalidate cached code authorization");
+  require(guest.protect({0x1000}, rx).has_value(), "restore execute access");
+  const let restored = (*program)->run_slice(state, 100);
+  require(restored && restored->compiled == 3,
+          "mapping generation forces checked recompilation");
+  require(guest.protect({0x1000}, rw).has_value(),
+          "stop and replace instruction image");
+  require(guest.store<std::uint32_t>({0x1000}, 0x1000ffff).has_value() &&
+              guest.store<std::uint32_t>({0x1004}, 0).has_value() &&
+              guest.protect({0x1000}, rx).has_value(),
+          "load infinite loop");
+  state = {};
+  state.pc = {0x1000};
+  const let changed = (*program)->run_slice(state, 100);
+  require(!changed &&
+              changed.error().code == jit::dispatch_error_code::code_changed,
+          "changed image cannot reuse stale translations");
+  constexpr std::array loop{mips::instruction_word{0x1000ffff},
+                            mips::instruction_word{0}};
+  let forever = jit::dispatcher::create(loop, {0x1000}, guest);
+  require(forever.has_value(), "create bounded infinite loop");
+  const let bounded = (*forever)->run_slice(state, 11);
+  require(bounded && bounded->reason == jit::stop_reason::budget_exhausted &&
+              bounded->instructions == 10 && state.pc.value == 0x1000,
+          "infinite guest loop obeys instruction budget");
+  alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array faulting{mips::instruction_word{0x10000001},
+                                mips::instruction_word{0x8c620000}};
+  let block = mips::translate(faulting, {0x3000}, arena);
+  require(block.has_value(), "translate faulting delay slot");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile faulting delay slot");
+  state.registers[3] = 0x9000;
+  const let failed = native->run(state.registers, guest);
+  require(!failed && failed.error().pc == 0x3004 &&
+              failed.error().branch_pc == 0x3000,
+          "delay-slot faults retain faulting and branch PCs");
+  const let missing =
+      mips::translate(std::span{loop}.first(1), {0x1000}, arena);
+  require(!missing &&
+              missing.error().code == mips::error_code::missing_delay_slot,
+          "reject missing delay slot");
+  constexpr std::array nested{mips::instruction_word{0x10000000},
+                              mips::instruction_word{0x10000000}};
+  require(!mips::translate(nested, {0x1000}, arena),
+          "reject branch in delay slot");
+}
+
 fn example_program() -> void {
   namespace mem = jit::memory;
   for (unsigned pass = 0; pass < 2; pass++) {
@@ -455,6 +593,7 @@ fn main() -> int {
   memory_operations();
   mmio_console();
   example_program();
+  branches_and_dispatch();
   std::println(
       "jit: native lowering, differential and ownership checks passed");
 }

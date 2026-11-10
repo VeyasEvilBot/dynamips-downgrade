@@ -106,6 +106,10 @@ fn run(std::span<const mips::instruction_word> words, bool dump_ir,
                "block";
       case mips::error_code::invalid_ir:
         return "IR construction failed";
+      case mips::error_code::missing_delay_slot:
+        return "branch has no delay slot";
+      case mips::error_code::branch_in_delay_slot:
+        return "branch in delay slot is unsupported";
       }
       return "translation failed";
     }();
