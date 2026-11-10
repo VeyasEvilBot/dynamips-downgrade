@@ -1,6 +1,7 @@
 module;
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -58,14 +59,21 @@ struct error {
   if (start.value % 4 != 0)
     return std::unexpected(error{error_code::unaligned_pc, 0});
   constexpr std::size_t nodes_per_instruction = 4;
-  if (words.size() >
-          std::numeric_limits<std::uint32_t>::max() / nodes_per_instruction ||
+  const let memory_instructions = static_cast<std::size_t>(
+      std::ranges::count_if(words, [](instruction_word word) {
+        const let op = word.bits >> 26;
+        return op == 0x23 || op == 0x2b || op == 0x37 || op == 0x3f;
+      }));
+  if (memory_instructions > std::numeric_limits<std::uint32_t>::max() ||
+      words.size() >
+          (std::numeric_limits<std::uint32_t>::max() - memory_instructions) /
+              nodes_per_instruction ||
       words.size() >
           (std::numeric_limits<std::uint64_t>::max() - start.value) / 4)
     return std::unexpected(error{error_code::block_too_large, 0});
   let created = ir::block::create(
       {start.value, static_cast<std::uint32_t>(words.size()), 32},
-      words.size() * nodes_per_instruction, memory);
+      words.size() * nodes_per_instruction + memory_instructions, memory);
   if (!created)
     return std::unexpected(
         error{created.error().code == ir::error_code::out_of_memory
@@ -83,12 +91,16 @@ struct error {
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
     const let function = bits & 63;
     const bool immediate = opcode == 0x0d;
-    if (!immediate && !(opcode == 0 && (function == 0x26 || function == 0x2d)))
+    const bool load = opcode == 0x23 || opcode == 0x37;
+    const bool store = opcode == 0x2b || opcode == 0x3f;
+    const bool memory_access = load || store;
+    if (!immediate && !memory_access &&
+        !(opcode == 0 && (function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
-    if (!immediate && ((bits >> 6) & 31) != 0)
+    if (!immediate && !memory_access && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
-    const let destination = immediate ? rt : rd;
-    if (destination == 0)
+    const let destination = immediate || memory_access ? rt : rd;
+    if (destination == 0 && !memory_access)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -112,6 +124,41 @@ struct error {
     const let left = read(rs);
     if (!left)
       return failed(left.error());
+    if (memory_access) {
+      const let offset = result.append(
+          ir::node::constant(static_cast<std::uint64_t>(std::int64_t{
+                                 static_cast<std::int16_t>(bits & 0xffff)}),
+                             source));
+      if (!offset)
+        return failed(offset.error());
+      const let address = result.append(
+          ir::node::binary(ir::binary_kind::add_wrap, *left, *offset, source));
+      if (!address)
+        return failed(address.error());
+      const let size = opcode == 0x23 || opcode == 0x2b ? ir::width::bits32
+                                                        : ir::width::bits64;
+      if (store) {
+        const let value = read(rt);
+        if (!value)
+          return failed(value.error());
+        if (let written =
+                result.append(ir::node::store(*address, *value, source, size));
+            !written)
+          return failed(written.error());
+      } else {
+        const let value = result.append(ir::node::load(*address, source, size));
+        if (!value)
+          return failed(value.error());
+        if (destination != 0) {
+          if (let written =
+                  result.append(ir::node::write({destination}, *value, source));
+              !written)
+            return failed(written.error());
+          registers[destination] = *value;
+        }
+      }
+      continue;
+    }
     const let right =
         immediate ? result.append(ir::node::constant(bits & 0xffff, source))
                   : read(rt);

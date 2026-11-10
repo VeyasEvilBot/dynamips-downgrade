@@ -14,6 +14,7 @@
 import jit.ir;
 import jit.mips64;
 import jit.amd64;
+import jit.memory;
 
 namespace {
 namespace ir = jit::ir;
@@ -225,6 +226,100 @@ fn observed_stores() -> void {
             "eliminate overwritten stores without changing observed state");
   }
 }
+
+fn memory_operations() -> void {
+  namespace mem = jit::memory;
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(memory.has_value() &&
+              (*memory)
+                  ->map_ram({0x1000}, {0},
+                            mem::permission::read | mem::permission::write)
+                  .has_value(),
+          "map JIT RAM");
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create memory compiler");
+  constexpr std::array words{
+      mips::instruction_word{0xac220000}, mips::instruction_word{0x8c230000},
+      mips::instruction_word{0xfc240008}, mips::instruction_word{0xdc250008},
+      mips::instruction_word{0x8ce6fffc}, mips::instruction_word{0xac200010},
+      mips::instruction_word{0x8c200000}};
+  for (unsigned pass = 0; pass < 2; pass++) {
+    alignas(std::max_align_t) std::array<std::byte, 64 * 1024> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block.has_value(), "translate memory instructions");
+    if (pass != 0)
+      require(ir::optimize(*block, ir::fold_constants).has_value(),
+              "optimize memory IR");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile memory IR");
+    std::array<std::uint64_t, 32> state{};
+    state[1] = 0x1000;
+    state[2] = 0x1122334480000001;
+    state[4] = 0xfedcba9876543210;
+    state[7] = 0x1004;
+    const let missing = native->run(state);
+    require(!missing &&
+                missing.error().code == amd64::error_code::memory_required,
+            "reject memory block without address space");
+    const let result = native->run(state, **memory);
+    require(result && *result == 0x101c && state[0] == 0 &&
+                state[3] == 0xffffffff80000001 && state[6] == state[3] &&
+                state[5] == state[4],
+            "native load/store widths, sign extension and signed offset");
+    require(ram[0] == std::byte{0x80} && ram[3] == std::byte{1} &&
+                (*memory)->load<std::uint64_t>({0x1010}) == 0,
+            "guest stores use guest byte order and architectural zero");
+  }
+  constexpr std::array faulting{mips::instruction_word{0x34011111},
+                                mips::instruction_word{0x8c620000},
+                                mips::instruction_word{0x34012222}};
+  for (unsigned discard = 0; discard < 2; discard++) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    let input = faulting;
+    if (discard != 0)
+      input[1].bits = 0x8c600000;
+    let block = mips::translate(input, {0x1000}, arena);
+    require(block.has_value(), "translate faulting load");
+    require(ir::optimize(*block, ir::fold_constants).has_value(),
+            "optimize faulting load");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile faulting load");
+    std::array<std::uint64_t, 32> state{};
+    state[2] = 0xaaaa;
+    state[3] = 0x3000;
+    const let result = native->run(state, **memory);
+    require(!result && result.error().pc == 0x1004 &&
+                result.error().access.address.value == 0x3000 &&
+                result.error().access.reason == mem::fault_reason::unmapped &&
+                state[1] == 0x1111 && state[2] == 0xaaaa && state[0] == 0,
+            "fault exits preserve earlier writes, including loads to zero");
+  }
+  require((*memory)->protect({0x1000}, mem::permission::read).has_value(),
+          "protect JIT RAM");
+  alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array store{mips::instruction_word{0xac220000},
+                             mips::instruction_word{0x3403002a}};
+  let block = mips::translate(store, {0x1000}, arena);
+  require(block.has_value(), "translate faulting store");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile faulting store");
+  std::array<std::uint64_t, 32> state{};
+  state[1] = 0x1000;
+  const let before = ram;
+  const let result = native->run(state, **memory);
+  require(!result && result.error().pc == 0x1000 &&
+              result.error().access.reason == mem::fault_reason::permission &&
+              result.error().access.access == mem::access_kind::write &&
+              state[3] == 0 && ram == before,
+          "faulting stores do not modify memory or later registers");
+}
 } // namespace
 
 fn main() -> int {
@@ -232,6 +327,7 @@ fn main() -> int {
   ownership_and_errors();
   immediate_operands();
   observed_stores();
+  memory_operations();
   std::println(
       "jit: native lowering, differential and ownership checks passed");
 }

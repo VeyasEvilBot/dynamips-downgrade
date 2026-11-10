@@ -12,6 +12,7 @@ using ::asmjit::Error;
 using ::asmjit::ErrorHandler;
 using ::asmjit::FuncSignature;
 using ::asmjit::Imm;
+using ::asmjit::InvokeNode;
 using ::asmjit::JitRuntime;
 using ::asmjit::kErrorOk;
 using ::asmjit::kErrorOutOfMemory;

@@ -1,6 +1,8 @@
 module;
 
 #include <algorithm>
+#include <bit>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -19,6 +21,7 @@ export module jit.amd64;
 
 import asmjit;
 import jit.ir;
+import jit.memory;
 
 export namespace jit::amd64 {
 
@@ -28,12 +31,20 @@ enum class error_code {
   code_generation,
   invalid_state,
   unavailable,
+  memory_required,
+  memory_fault,
 };
 
 struct error {
   error_code code;
   std::size_t node_index = 0;
   std::uint32_t native_code = 0;
+};
+
+struct execution_error {
+  error_code code;
+  std::uint64_t pc;
+  memory::fault access{};
 };
 
 [[nodiscard]] fn message(error value) noexcept -> std::string_view {
@@ -50,6 +61,10 @@ struct error {
     return "state has too few slots";
   case error_code::unavailable:
     return "native AMD64 backend is unavailable";
+  case error_code::memory_required:
+    return "block requires guest memory";
+  case error_code::memory_fault:
+    return "guest memory access failed";
   }
   return "native compilation failed";
 }
@@ -63,7 +78,8 @@ public:
 
   compiled_block(compiled_block &&other) noexcept
       : runtime_(std::move(other.runtime_)),
-        entry_(std::exchange(other.entry_, nullptr)), slots_(other.slots_) {}
+        entry_(std::exchange(other.entry_, nullptr)), slots_(other.slots_),
+        uses_memory_(other.uses_memory_) {}
 
   fn operator=(compiled_block &&other) noexcept -> compiled_block & {
     if (this != &other) {
@@ -71,6 +87,7 @@ public:
       runtime_ = std::move(other.runtime_);
       entry_ = std::exchange(other.entry_, nullptr);
       slots_ = other.slots_;
+      uses_memory_ = other.uses_memory_;
     }
     return *this;
   }
@@ -83,20 +100,71 @@ public:
       return std::unexpected(error{error_code::unavailable});
     if (state.size() < slots_)
       return std::unexpected(error{error_code::invalid_state});
-    return entry_(state.data());
+    if (uses_memory_)
+      return std::unexpected(error{error_code::memory_required});
+    return entry_(state.data(), nullptr);
+  }
+
+  [[nodiscard]] fn run(std::span<std::uint64_t> state,
+                        memory::address_space &memory) const noexcept
+      -> std::expected<std::uint64_t, execution_error> {
+    if (!entry_)
+      return std::unexpected(execution_error{error_code::unavailable, 0});
+    if (state.size() < slots_)
+      return std::unexpected(execution_error{error_code::invalid_state, 0});
+    execution_context context{&memory};
+    const let pc = entry_(state.data(), &context);
+    if (context.failed)
+      return std::unexpected(
+          execution_error{error_code::memory_fault, pc, context.fault});
+    return pc;
   }
 
 private:
   friend class compiler;
-  using entry_point = std::uint64_t (*)(std::uint64_t *);
+
+  struct execution_context {
+    memory::address_space *memory;
+    memory::fault fault{};
+    bool failed = false;
+  };
+
+  using entry_point = std::uint64_t (*)(std::uint64_t *, execution_context *);
+
+  template <std::unsigned_integral T>
+  static fn load(execution_context *context, std::uint64_t address) noexcept
+      -> std::uint64_t {
+    let result = context->memory->load<T>({address});
+    if (!result) {
+      context->fault = result.error();
+      context->failed = true;
+      return 0;
+    }
+    if constexpr (sizeof(T) == 4)
+      return static_cast<std::uint64_t>(
+          std::int64_t{std::bit_cast<std::int32_t>(*result)});
+    return *result;
+  }
+
+  template <std::unsigned_integral T>
+  static fn store(execution_context *context, std::uint64_t address,
+                   std::uint64_t value) noexcept -> void {
+    let result = context->memory->store<T>({address}, static_cast<T>(value));
+    if (!result) {
+      context->fault = result.error();
+      context->failed = true;
+    }
+  }
 
   compiled_block(std::shared_ptr<asmjit::JitRuntime> runtime, entry_point entry,
-                 std::uint16_t slots) noexcept
-      : runtime_(std::move(runtime)), entry_(entry), slots_(slots) {}
+                 std::uint16_t slots, bool uses_memory) noexcept
+      : runtime_(std::move(runtime)), entry_(entry), slots_(slots),
+        uses_memory_(uses_memory) {}
 
   std::shared_ptr<asmjit::JitRuntime> runtime_;
   entry_point entry_;
   std::uint16_t slots_;
+  bool uses_memory_;
 
   fn reset() noexcept -> void {
     // Only this owner can release the installed entry point.
@@ -166,13 +234,19 @@ public:
         return failure(status, 0);
       asmjit::x86::Compiler output{&code};
       const let function = output.addFunc(
-          asmjit::FuncSignature::build<std::uint64_t, std::uint64_t *>());
+          asmjit::FuncSignature::build<std::uint64_t, std::uint64_t *,
+                                       compiled_block::execution_context *>());
       if (!function)
         return failure(errors.code, 0);
       const let state = output.newUIntPtr();
       if (errors.code)
         return failure(errors.code, 0);
       function->setArg(0, state);
+      const let context = output.newUIntPtr();
+      if (errors.code)
+        return failure(errors.code, 0);
+      function->setArg(1, context);
+      bool uses_memory = false;
 
       const let operand = [&](ir::value_id id)
           -> std::expected<asmjit::x86::Gp, asmjit::Error> {
@@ -205,6 +279,72 @@ public:
         const let &node = block.nodes()[i];
         if (node.op == ir::opcode::constant)
           continue;
+        if (node.op == ir::opcode::load32_signed ||
+            node.op == ir::opcode::load64 || node.op == ir::opcode::store32 ||
+            node.op == ir::opcode::store64) {
+          uses_memory = true;
+          const let address = operand(node.data.inputs.left);
+          if (!address)
+            return failure(address.error(), i);
+          asmjit::InvokeNode *call = nullptr;
+          asmjit::Error status;
+          if (ir::produces_value(node.op)) {
+            const let result = output.newUInt64();
+            if (errors.code)
+              return failure(errors.code, i);
+            values[i] = result;
+            const let target = node.op == ir::opcode::load32_signed
+                                   ? &compiled_block::load<std::uint32_t>
+                                   : &compiled_block::load<std::uint64_t>;
+            status = output.invoke(
+                &call, asmjit::Imm{target},
+                asmjit::FuncSignature::build<
+                    std::uint64_t, compiled_block::execution_context *,
+                    std::uint64_t>());
+            if (status)
+              return failure(status, i);
+            call->setRet(0, result);
+          } else {
+            const let value = operand(node.data.inputs.right);
+            if (!value)
+              return failure(value.error(), i);
+            const let target = node.op == ir::opcode::store32
+                                   ? &compiled_block::store<std::uint32_t>
+                                   : &compiled_block::store<std::uint64_t>;
+            status =
+                output.invoke(&call, asmjit::Imm{target},
+                              asmjit::FuncSignature::build<
+                                  void, compiled_block::execution_context *,
+                                  std::uint64_t, std::uint64_t>());
+            if (status)
+              return failure(status, i);
+            call->setArg(2, *value);
+          }
+          call->setArg(0, context);
+          call->setArg(1, *address);
+          const let success = output.newLabel();
+          if (errors.code)
+            return failure(errors.code, i);
+          if (const let emitted = output.cmp(
+                  asmjit::x86::Mem{
+                      context,
+                      offsetof(compiled_block::execution_context, failed), 1},
+                  0))
+            return failure(emitted, i);
+          if (const let emitted = output.je(success))
+            return failure(emitted, i);
+          const let fault_pc = output.newUInt64();
+          if (errors.code)
+            return failure(errors.code, i);
+          if (const let emitted =
+                  output.mov(fault_pc, asmjit::Imm{block.source_pc(node)}))
+            return failure(emitted, i);
+          if (const let emitted = output.ret(fault_pc))
+            return failure(emitted, i);
+          if (const let emitted = output.bind(success))
+            return failure(emitted, i);
+          continue;
+        }
         if (node.op == ir::opcode::write_state) {
           if (!keep_store[i])
             continue;
@@ -262,6 +402,10 @@ public:
           break;
         }
         case ir::opcode::write_state:
+        case ir::opcode::load32_signed:
+        case ir::opcode::load64:
+        case ir::opcode::store32:
+        case ir::opcode::store64:
           break;
         }
         if (status || errors.code)
@@ -281,7 +425,8 @@ public:
       compiled_block::entry_point entry = nullptr;
       if (const let status = runtime_->add(&entry, &code))
         return failure(status, block.nodes().size());
-      return compiled_block{runtime_, entry, block.info().state_slots};
+      return compiled_block{runtime_, entry, block.info().state_slots,
+                            uses_memory};
     } catch (const std::bad_alloc &) {
       return std::unexpected(error{error_code::out_of_memory});
     }

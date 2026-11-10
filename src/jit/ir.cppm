@@ -39,7 +39,16 @@ enum class opcode : std::uint8_t {
   bit_or,
   bit_xor,
   write_state,
+  load32_signed,
+  load64,
+  store32,
+  store64,
 };
+
+constexpr fn produces_value(opcode op) noexcept -> bool {
+  return op != opcode::write_state && op != opcode::store32 &&
+         op != opcode::store64;
+}
 
 enum class binary_kind : std::uint8_t { add_wrap, bit_or, bit_xor };
 
@@ -85,6 +94,25 @@ struct node {
             source,
             slot,
             opcode::write_state,
+            width::bits64};
+  }
+
+  static constexpr fn load(value_id address, std::uint32_t source,
+                            width size) noexcept -> node {
+    return {{.inputs = {address, {}}},
+            source,
+            {},
+            size == width::bits32 ? opcode::load32_signed : opcode::load64,
+            width::bits64};
+  }
+
+  static constexpr fn store(value_id address, value_id value,
+                             std::uint32_t source, width size) noexcept
+      -> node {
+    return {{.inputs = {address, value}},
+            source,
+            {},
+            size == width::bits32 ? opcode::store32 : opcode::store64,
             width::bits64};
   }
 };
@@ -209,8 +237,7 @@ private:
     if (current.type != width::bits32 && current.type != width::bits64)
       return fail(error_code::invalid_type);
     const let operand_valid = [&](value_id input) {
-      return input.index < index &&
-             nodes_[input.index].op != opcode::write_state &&
+      return input.index < index && produces_value(nodes_[input.index].op) &&
              nodes_[input.index].type == current.type;
     };
     switch (current.op) {
@@ -234,6 +261,17 @@ private:
     case opcode::bit_xor:
       if (!operand_valid(current.data.inputs.left) ||
           !operand_valid(current.data.inputs.right))
+        return fail(error_code::invalid_operand);
+      break;
+    case opcode::load32_signed:
+    case opcode::load64:
+    case opcode::store32:
+    case opcode::store64:
+      if (current.type != width::bits64)
+        return fail(error_code::invalid_type);
+      if (!operand_valid(current.data.inputs.left) ||
+          (!produces_value(current.op) &&
+           !operand_valid(current.data.inputs.right)))
         return fail(error_code::invalid_operand);
       break;
     default:
@@ -266,6 +304,20 @@ private:
         out =
             std::format_to(out, "  state.write i64 %v{}, %state, {}",
                            current.data.inputs.left.index, current.slot.index);
+        break;
+      case opcode::load32_signed:
+      case opcode::load64:
+        out =
+            std::format_to(out, "  %v{} = load.guest.{} %v{}", i,
+                           current.op == opcode::load32_signed ? "s32" : "i64",
+                           current.data.inputs.left.index);
+        break;
+      case opcode::store32:
+      case opcode::store64:
+        out = std::format_to(out, "  store.guest i{} %v{}, %v{}",
+                             current.op == opcode::store32 ? 32 : 64,
+                             current.data.inputs.right.index,
+                             current.data.inputs.left.index);
         break;
       case opcode::add_wrap:
       case opcode::bit_or:
