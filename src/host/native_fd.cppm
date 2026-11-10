@@ -3,6 +3,7 @@ module;
 #include <dynamips/macros.h>
 #include <cerrno>
 #include <cstdio>
+#include <print>
 #include <expected>
 #include <fcntl.h>
 #include <system_error>
@@ -29,8 +30,12 @@ public:
   }
 
   ~file_descriptor() {
-    if (value_ >= 0 && close(value_) != 0)
-      std::fprintf(stderr, "close FD %d: error %d\n", value_, errno);
+    if (value_ >= 0 && close(value_) != 0) {
+      try {
+        std::println(stderr, "close FD {}: error {}", value_, errno);
+      } catch (...) {
+      } // Diagnostics must not escape destruction.
+    }
   }
 
   fn get() const noexcept -> int { return value_; }

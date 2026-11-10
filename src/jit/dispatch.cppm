@@ -6,7 +6,6 @@ module;
 #include <cstdint>
 #include <expected>
 #include <exception>
-#include <limits>
 #include <memory>
 #include <memory_resource>
 #include <new>
@@ -123,8 +122,11 @@ public:
       let &entry = cache_[index];
       if (!entry.code) {
         const let compiled = compile(index, dump_ir);
-        if (!compiled)
+        if (!compiled) {
+          if (compiled.error().code == dispatch_error_code::memory)
+            state.pc.value = compiled.error().pc;
           return std::unexpected(compiled.error());
+        }
         result.compiled++;
       }
       if (entry.instructions > budget - result.instructions) {
@@ -178,9 +180,23 @@ private:
     const let pc = start_.value + index * 4;
     for (std::size_t i = 0; i < count; i++) {
       const let fetched = memory_.fetch<std::uint32_t>({pc + i * 4});
-      if (!fetched)
-        return std::unexpected(dispatch_error{dispatch_error_code::memory,
-                                              pc + i * 4, fetched.error()});
+      if (!fetched) {
+        const bool delay_slot =
+            i != 0 && mips64::is_branch(image_[index + i - 1]);
+        const let prefix = delay_slot ? i - 1 : i;
+        if (prefix != 0) {
+          count = prefix;
+          break;
+        }
+        return std::unexpected(dispatch_error{
+            dispatch_error_code::memory,
+            pc + i * 4,
+            fetched.error(),
+            {},
+            {},
+            delay_slot ? std::optional<std::uint64_t>{pc + (i - 1) * 4}
+                       : std::nullopt});
+      }
       if (*fetched != image_[index + i].bits)
         return std::unexpected(
             dispatch_error{dispatch_error_code::code_changed, pc + i * 4});

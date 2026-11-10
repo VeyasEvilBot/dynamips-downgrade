@@ -2,6 +2,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <concepts>
 #include <cstddef>
 #include <expected>
@@ -55,10 +56,7 @@ public:
       -> std::expected<void, fifo_error> {
     if (count > size_)
       return std::unexpected(fifo_error::invalid_count);
-    head_ = (head_ + count) % Capacity;
-    size_ -= count;
-    if (size_ == 0)
-      head_ = 0;
+    advance(count);
     return {};
   }
 
@@ -66,7 +64,7 @@ public:
     if (size_ == 0)
       return std::nullopt;
     const let value = bytes_[head_];
-    static_cast<void>(consume(1));
+    advance(1);
     return value;
   }
 
@@ -104,13 +102,21 @@ public:
                                             fifo_error::invalid_count}});
       if (*result == 0)
         break;
-      static_cast<void>(consume(*result));
+      advance(*result);
       transferred += *result;
     }
     return transferred;
   }
 
 private:
+  fn advance(std::size_t count) noexcept -> void {
+    assert(count <= size_);
+    head_ = (head_ + count) % Capacity;
+    size_ -= count;
+    if (size_ == 0)
+      head_ = 0;
+  }
+
   std::array<std::byte, Capacity> bytes_;
   std::size_t head_ = 0;
   std::size_t size_ = 0;

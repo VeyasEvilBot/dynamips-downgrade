@@ -20,6 +20,10 @@ run = "xmake f -m debug -y && xmake -j \"${DYNAMIPS_BUILD_JOBS:-14}\" -y"
 description = "build and run the standalone MIPS-to-native playground"
 run = 'xmake build -y jit-playground && xmake run jit-playground "$@"'
 
+[tasks."run:c7200"]
+description = "prepare the C++ NPE-400 chassis and probe real ROM execution"
+run = 'xmake build -y c7200-boot && xmake run c7200-boot "$@"'
+
 [tasks."test:jit"]
 description = "compare native JIT execution with MIPS register semantics"
 run = "xmake test --output-on-failure 'jit-test/*'"
@@ -40,8 +44,24 @@ echo "All test suites passed"
 '''
 
 [tasks."test:core"]
-description = "test native JIT and guest memory together"
-run = "xmake test --output-on-failure 'jit-test/*' 'memory-test/*'"
+description = "test JIT, queued devices and guest memory"
+run = "xmake test --output-on-failure 'jit-test/*' 'memory-test/*' 'device-test/*'"
+
+[tasks."test:devices"]
+description = "test queued UART dispatch, FIFO backpressure and MMIO"
+run = "xmake test --output-on-failure 'jit-test/devices' 'memory-test/*' 'device-test/*'"
+
+[tasks."test:console"]
+description = "test real Unix console streams, backpressure and cancellation"
+run = "xmake test --output-on-failure 'console-test/*'"
+
+[tasks."test:machine"]
+description = "test chassis composition, ELF loading and the real C7200 ROM boot boundary"
+run = "xmake test --output-on-failure 'machine-test/*'"
+
+[tasks."test:host"]
+description = "test shared host helpers through C++ modules and real C callers"
+run = "xmake test --output-on-failure 'host-test/*'"
 
 [tasks."test:memory"]
 description = "test two-level guest memory access and faults"
@@ -122,9 +142,29 @@ clang-tidy -p . -checks='-*,clang-analyzer-core.*,clang-analyzer-cplusplus.*,cla
   --extra-arg=-Wall --extra-arg=-Wextra \
   --extra-arg=-Wpedantic --extra-arg=-Wshadow --extra-arg=-Wconversion \
   --extra-arg=-Wsign-conversion --extra-arg=-Werror --quiet \
-  common/native_fd.cppm common/host_memory.cppm common/rommon_var.cpp common/net_packet.cppm \
+  src/host/native_fd.cppm src/host/host_memory.cppm src/host/console.cppm src/devices/console.cppm common/host_memory_compat.cpp common/rommon_var.cpp common/net_packet.cppm \
   common/net_io_udp.cppm common/vtty_io.cppm
 """
+
+[tasks."lint:cpp:jit"]
+description = "check JIT and device modules, including editor warnings"
+depends = ["compiledb"]
+# MissingIncludes does not recognize native module imports; keep unused-header checks.
+run = """
+clang-tidy -p . -checks='-*,clang-analyzer-core.*,clang-analyzer-cplusplus.*,clang-analyzer-deadcode.*,clang-analyzer-unix.*,bugprone-use-after-move,bugprone-unused-return-value,misc-include-cleaner' -config='{CheckOptions: {misc-include-cleaner.MissingIncludes: false}}' -warnings-as-errors='*' --quiet \
+  src/jit/*.cppm src/devices/*.cppm src/machine/*.cppm src/boot_main.cpp src/jit_main.cpp tests/console.cpp tests/console_guest.cpp tests/machine.cpp tests/jit.cpp tests/memory.cpp tests/devices.cpp
+"""
+
+[tasks."lint:clangd"]
+description = "check clangd parsing for playground modules and consumers"
+depends = ["compiledb"]
+run = '''
+set -eu
+for source in modules/asmjit.cppm src/host/*.cppm src/jit/*.cppm src/devices/*.cppm src/machine/*.cppm src/boot_main.cpp src/jit_main.cpp tests/console.cpp tests/console_guest.cpp tests/machine.cpp tests/jit.cpp tests/memory.cpp tests/devices.cpp tests/host.cpp tests/host_compat.c common/host_memory_compat.cpp; do
+  echo "Checking clangd: $source"
+  clangd --check="$source" --tweaks= --log=error
+done
+'''
 
 [tasks."test:native"]
 description = "test the C++ module"
@@ -142,7 +182,14 @@ PKG_CONFIG_PATH="$PWD/build/install/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG
 [tasks.compiledb]
 description = "generate clangd compile commands for C and C++ sources"
 depends = ["build:native"]
-run = "xmake build -y jit-playground jit-test memory-test memory-bench dynamips-module-test && xmake project -k compile_commands --lsp=clangd ."
+run = '''
+set -eu
+xmake build -y jit-playground jit-test memory-test device-test host-test console-test machine-test c7200-boot memory-bench dynamips-module-test
+compiledb_stage=$(mktemp -d "$PWD/build/compiledb.XXXXXX")
+trap 'rm -rf "$compiledb_stage"' EXIT
+xmake project -k compile_commands --lsp=clangd "$compiledb_stage"
+mv "$compiledb_stage/compile_commands.json" "$PWD/compile_commands.json"
+'''
 
 [tasks.format]
 description = "format C and C++ sources"
@@ -177,5 +224,7 @@ fi
 '''
 
 [tasks.check]
-description = "Check Go policies, native contracts, and bindings"
-depends = ["lint:architecture", "lint:go", "test"]
+description = "Check policies, native code, clangd, and all tests"
+depends = ["lint:architecture", "lint:go", "lint:cpp", "lint:cpp:ports", "lint:cpp:jit", "lint:clangd"]
+# Build and lint finish before tests to avoid concurrent xmake mutations.
+run = "mise run test"

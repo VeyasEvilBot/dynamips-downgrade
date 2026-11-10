@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <algorithm>
+#include <expected>
 #include <memory_resource>
 #include <optional>
 #include <print>
@@ -542,6 +544,138 @@ fn branches_and_dispatch() -> void {
           "reject branch in delay slot");
 }
 
+fn instruction_fetch_faults() -> void {
+  namespace mem = jit::memory;
+  constexpr let rw = mem::permission::read | mem::permission::write;
+  constexpr let rx = mem::permission::read | mem::permission::execute;
+  for (unsigned scenario = 0; scenario < 4; scenario++) {
+    const bool branch = (scenario & 1) != 0;
+    const bool denied = (scenario & 2) != 0;
+    std::array<std::byte, 2 * mem::page_size> ram{};
+    let memory = mem::address_space::create(ram, 2);
+    require(memory && (*memory)->map_ram({0x1000}, {0}, rw).has_value(),
+            "map boundary fetch code");
+    const std::array words{mips::instruction_word{0x34010007},
+                           mips::instruction_word{branch ? 0x10000000u : 0u},
+                           mips::instruction_word{0}};
+    for (std::size_t i = 0; i < 2; i++)
+      require((*memory)
+                  ->store<std::uint32_t>({0x1ff8 + i * 4}, words[i].bits)
+                  .has_value(),
+              "load boundary fetch code");
+    require((*memory)->protect({0x1000}, rx).has_value(),
+            "protect boundary code");
+    if (denied)
+      require((*memory)
+                  ->map_ram({0x2000}, {mem::page_size}, mem::permission::read)
+                  .has_value(),
+              "map non-executable next page");
+    let dispatch = jit::dispatcher::create(words, {0x1ff8}, **memory);
+    require(dispatch.has_value(), "create boundary dispatcher");
+    mips::state state{};
+    state.pc = {0x1ff8};
+    const let result = (*dispatch)->run_slice(state, 100);
+    require(!result &&
+                result.error().code == jit::dispatch_error_code::memory &&
+                result.error().access.reason ==
+                    (denied ? mem::fault_reason::permission
+                            : mem::fault_reason::unmapped) &&
+                result.error().pc == 0x2000 && state.pc.value == 0x2000 &&
+                state.registers[1] == 7,
+            "later fetch fault preserves earlier instructions and fault PC");
+    require(result.error().branch_pc ==
+                (branch ? std::optional<std::uint64_t>{0x1ffc} : std::nullopt),
+            "delay-slot fetch fault retains branch PC");
+  }
+}
+
+fn queued_uart_dispatch() -> void {
+  namespace mem = jit::memory;
+  constexpr std::array words{
+      mips::instruction_word{0x34018000}, // UART base
+      mips::instruction_word{0x34030000}, // byte counter
+      mips::instruction_word{0x34041388}, // 5000 bytes
+      mips::instruction_word{0x34050001}, // stride
+      mips::instruction_word{0x8c220004}, // poll TX ready
+      mips::instruction_word{0x1040fffe}, // retry when full
+      mips::instruction_word{0},
+      mips::instruction_word{0xac230000}, // transmit counter low byte
+      mips::instruction_word{0x0065182d}, // increment counter
+      mips::instruction_word{0x1464fffa}, // next byte
+      mips::instruction_word{0}};
+  std::array<std::byte, mem::page_size> ram{};
+  jit::uart console{{0x100000}};
+  let memory = mem::address_space::create(ram, 2);
+  require(memory.has_value(), "create queued dispatch memory");
+  let &guest = **memory;
+  constexpr let rw = mem::permission::read | mem::permission::write;
+  require(guest.map_ram({0x1000}, {0}, rw).has_value() &&
+              guest.map_device({0x8000}, {0x100000}, console.endpoint(), rw)
+                  .has_value(),
+          "map queued dispatch code and UART");
+  for (std::size_t i = 0; i < words.size(); i++)
+    require(
+        guest.store<std::uint32_t>({0x1000 + i * 4}, words[i].bits).has_value(),
+        "load queued dispatch program");
+  require(
+      guest.protect({0x1000}, mem::permission::read | mem::permission::execute)
+          .has_value(),
+      "protect queued dispatch code");
+  for (std::size_t i = 0; i < jit::uart::capacity; i++)
+    require(guest.store<std::uint32_t>({0x8000}, 0xaa).has_value(),
+            "prefill TX to exercise guest backpressure");
+  let dispatch = jit::dispatcher::create(words, {0x1000}, guest);
+  require(dispatch.has_value(), "create queued UART dispatcher");
+  mips::state state{};
+  state.pc = {0x1000};
+  const let blocked = (*dispatch)->run_slice(state, 1000, 64);
+  require(blocked && blocked->reason == jit::stop_reason::yielded &&
+              state.registers[3] == 0 &&
+              console.pending() == jit::uart::capacity,
+          "guest polling yields while TX is full without dropping bytes");
+  const let discard =
+      console.drain([](std::span<const std::byte> bytes) noexcept
+                        -> std::expected<std::size_t, int> {
+        for (const let byte : bytes)
+          require(byte == std::byte{0xaa}, "prefilled output survives polling");
+        return bytes.size();
+      });
+  require(discard && *discard == jit::uart::capacity, "drain prefilled TX");
+  std::size_t received = 0;
+  std::uint64_t instructions = 0;
+  bool completed = false;
+  for (std::size_t slice = 0; slice < 1000; slice++) {
+    const let result =
+        (*dispatch)->run_slice(state, 1'000'000 - instructions, 64);
+    require(result.has_value(), "execute queued UART slice");
+    instructions += result->instructions;
+    bool acknowledged = false;
+    const let drained =
+        console.drain([&](std::span<const std::byte> bytes) noexcept
+                          -> std::expected<std::size_t, int> {
+          if (acknowledged)
+            return 0;
+          acknowledged = true;
+          const let count = std::min<std::size_t>(7, bytes.size());
+          for (std::size_t i = 0; i < count; i++) {
+            require(bytes[i] == static_cast<std::byte>(received & 255),
+                    "partial host drains preserve guest byte ordering");
+            received++;
+          }
+          return count;
+        });
+    require(drained.has_value(), "drain queued UART slice");
+    completed = result->reason == jit::stop_reason::completed;
+    if (completed && console.pending() == 0)
+      break;
+    require(result->reason != jit::stop_reason::budget_exhausted,
+            "UART polling makes progress within budget");
+  }
+  require(completed && received == 5000 && state.registers[3] == 5000 &&
+              console.pending() == 0,
+          "bounded queued execution delivers every byte across FIFO wraps");
+}
+
 fn example_program() -> void {
   namespace mem = jit::memory;
   for (unsigned pass = 0; pass < 2; pass++) {
@@ -585,7 +719,13 @@ fn example_program() -> void {
 
 } // namespace
 
-fn main() -> int {
+fn main(int argc, char **argv) -> int {
+  if (argc == 2 && std::string_view{argv[1]} == "--devices") {
+    queued_uart_dispatch();
+    std::println("jit: queued UART, backpressure and dispatch checks passed");
+    return 0;
+  }
+  require(argc == 1, "unknown test arguments");
   differential();
   ownership_and_errors();
   immediate_operands();
@@ -594,6 +734,7 @@ fn main() -> int {
   mmio_console();
   example_program();
   branches_and_dispatch();
+  instruction_fetch_faults();
   std::println(
       "jit: native lowering, differential and ownership checks passed");
 }

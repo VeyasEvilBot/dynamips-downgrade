@@ -31,6 +31,13 @@ public:
   fn operator=(const uart &) -> uart & = delete;
 
   fn endpoint() noexcept -> memory::device & { return endpoint_; }
+  fn reset() noexcept -> void {
+    tx_ = {};
+    rx_ = {};
+  }
+
+  fn pending_input() const noexcept -> std::size_t { return rx_.size(); }
+
   fn pending() const noexcept -> std::size_t { return tx_.size(); }
   fn receive(std::span<const std::byte> bytes) noexcept -> std::size_t {
     return rx_.write(bytes);

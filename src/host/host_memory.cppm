@@ -27,6 +27,9 @@ struct file_buffer {
 
 fn read_file(const char *filename, bool read_contents = true) noexcept
     -> std::expected<file_buffer, std::error_code>;
+fn read_file_bounded(const char *filename, std::size_t limit,
+                       bool read_contents = true) noexcept
+    -> std::expected<file_buffer, std::error_code>;
 fn allocate_aligned(std::size_t alignment, std::size_t size) noexcept
     -> std::expected<owned_bytes, std::error_code>;
 } // namespace dynamips::host
@@ -41,6 +44,13 @@ using file = std::unique_ptr<FILE, decltype(&std::fclose)>;
 } // namespace
 
 fn read_file(const char *filename, bool read_contents) noexcept
+    -> std::expected<file_buffer, std::error_code> {
+  return read_file_bounded(filename, std::numeric_limits<std::size_t>::max(),
+                           read_contents);
+}
+
+fn read_file_bounded(const char *filename, std::size_t limit,
+                       bool read_contents) noexcept
     -> std::expected<file_buffer, std::error_code> {
   if (!filename)
     return failure(EINVAL);
@@ -58,6 +68,8 @@ fn read_file(const char *filename, bool read_contents) noexcept
   if (fseeko(input.get(), 0, SEEK_SET) != 0)
     return failure(errno);
   const let size = static_cast<std::size_t>(length);
+  if (size > limit)
+    return failure(EFBIG);
   owned_bytes bytes;
   if (read_contents) {
     // Empty configuration is distinct from an absent configuration.
@@ -83,26 +95,3 @@ fn allocate_aligned(std::size_t alignment, std::size_t size) noexcept
   return owned_bytes{static_cast<unsigned char *>(ptr)};
 }
 } // namespace dynamips::host
-
-cfn m_read_file(const char *filename, unsigned char **buffer,
-                std::size_t *length) -> int {
-  let loaded = dynamips::host::read_file(filename, buffer != nullptr);
-  if (!loaded) {
-    if (buffer)
-      *buffer = nullptr;
-    errno = loaded.error().value();
-    return -1;
-  }
-  if (length)
-    *length = loaded->size;
-  if (buffer)
-    *buffer = loaded->bytes.release();
-  return 0;
-}
-
-cfn m_memalign(std::size_t boundary, std::size_t size) -> void * {
-  let allocated = dynamips::host::allocate_aligned(boundary, size);
-  if (!allocated)
-    return nullptr;
-  return allocated->release();
-}

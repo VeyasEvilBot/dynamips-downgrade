@@ -1,0 +1,176 @@
+#include <charconv>
+#include <cstdint>
+#include <exception>
+#include <expected>
+#include <utility>
+#include <optional>
+#include <print>
+#include <string_view>
+#include <system_error>
+#include <variant>
+
+#include <dynamips/macros.h>
+
+import machine.firmware;
+import machine.core;
+import machine.c7200;
+import jit.memory;
+import jit.dispatch;
+import jit.devices;
+
+namespace {
+namespace machine = dynamips::machine;
+fn load(const char *path)
+    -> std::expected<dynamips::firmware::image, dynamips::firmware::error> {
+  let result = dynamips::firmware::image::read(path);
+  if (!result) {
+    const let &error = result.error();
+    if (error.host)
+      std::println(stderr, "boot: {}: {}", path, error.host.message());
+    else
+      std::println(stderr, "boot: {}: {} at section {}", path,
+                   dynamips::firmware::message(error.code), error.section);
+  }
+  return result;
+}
+
+fn setup_message(machine::setup_issue issue) noexcept -> std::string_view {
+  switch (issue) {
+  case machine::setup_issue::invalid_definition:
+    return "invalid chassis memory or device layout";
+  case machine::setup_issue::invalid_attachment:
+    return "duplicate or invalid device attachment";
+  case machine::setup_issue::invalid_firmware:
+    return "firmware entry or section does not fit the chassis RAM/ROM layout";
+  case machine::setup_issue::boot_window_too_large:
+    return "ROM boot window exceeds the current dispatcher limit";
+  }
+  return "machine setup failed";
+}
+
+fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
+         bool dump_ir) -> int {
+  let rom = load(rom_path);
+  if (!rom)
+    return 1;
+  std::optional<dynamips::firmware::image> ios;
+  if (ios_path) {
+    let loaded = load(ios_path);
+    if (!loaded)
+      return 1;
+    ios.emplace(std::move(*loaded));
+  }
+  let board = machine::instance::create(dynamips::c7200::npe400, *rom,
+                                         ios ? &*ios : nullptr);
+  if (!board) {
+    const let &error = board.error();
+    if (const let *host = std::get_if<std::error_code>(&error.cause))
+      std::println(stderr, "boot: machine setup failed: {}", host->message());
+    else if (const let *issue = std::get_if<machine::setup_issue>(&error.cause))
+      std::println(stderr, "boot: {} (item {})", setup_message(*issue),
+                   error.item);
+    else
+      std::println(stderr, "boot: machine setup failed (category {}, item {})",
+                   error.cause.index(), error.item);
+    return 1;
+  }
+  const let &model = (*board)->model();
+  std::println("{}: CPU {}, configured PRID={:#x}", model.name, model.cpu.name,
+               model.cpu.processor_id);
+  std::println("RAM={} MiB; ROM={} MiB at {:#x}; reset PC={:#x}",
+               model.ram_bytes / (1024 * 1024), model.rom.size / (1024 * 1024),
+               model.rom.base.value, model.cpu.reset.value);
+  if ((*board)->ios_entry())
+    std::println("IOS loaded into RAM; entry={:#x}", *(*board)->ios_entry());
+  std::println("Boot probe: CP0, general TLB translation and C7200 controllers "
+               "remain unimplemented.");
+  const let result = (*board)->run_slice(budget, 64, dump_ir);
+  if (!result) {
+    if (const let *guest =
+            std::get_if<jit::dispatch_error>(&result.error().cause)) {
+      const let word = (*board)->memory().fetch<std::uint32_t>({guest->pc});
+      if (guest->code == jit::dispatch_error_code::translation && word) {
+        const let name = (*word >> 26) == 3 ? "JAL" : "unsupported opcode";
+        std::println(
+            stderr,
+            "boot blocked at PC {:#x}: {} ({:#010x}), translation error {}",
+            guest->pc, name, *word,
+            static_cast<unsigned>(guest->translation.code));
+      } else if (guest->code == jit::dispatch_error_code::memory) {
+        std::println(stderr,
+                     "boot blocked at PC {:#x}: memory fault {} at {:#x}",
+                     guest->pc, static_cast<unsigned>(guest->access.reason),
+                     guest->access.address.value);
+        const let physical = machine::physical(guest->access.address.value);
+        for (const let &window : model.windows)
+          if (physical && *physical >= window.range.base.value &&
+              *physical - window.range.base.value < window.range.size)
+            std::println(stderr, "Missing device: {}", window.name);
+      } else
+        std::println(stderr, "boot blocked at PC {:#x}: dispatcher error {}",
+                     guest->pc, static_cast<unsigned>(guest->code));
+    } else {
+      const let &device =
+          std::get<jit::devices::service_error>(result.error().cause);
+      std::println(stderr, "boot: device {} servicing failed: {}",
+                   device.device.value, device.cause.message());
+    }
+    return 2;
+  }
+  std::println("Probe executed {} instructions; PC={:#x}; stop={}",
+               result->instructions, (*board)->cpu().pc.value,
+               static_cast<unsigned>(result->reason));
+  return result->reason == jit::stop_reason::completed ? 0 : 2;
+}
+} // namespace
+
+fn main(int argc, char **argv) -> int {
+  try {
+    const char *rom = "stable/mips64_microcode";
+    const char *ios = nullptr;
+    std::uint64_t budget = 4096;
+    bool dump_ir = false;
+    for (int i = 1; i < argc; i++) {
+      const std::string_view argument{argv[i]};
+      if (argument == "--help") {
+        std::println(
+            "Usage: c7200-boot [--rom ELF] [--ios ELF] [--budget N] "
+            "[--dump-ir]\n"
+            "Prepare the C++ NPE-400 chassis and probe ROM execution.\n"
+            "Default ROM: stable/mips64_microcode. Exit 2 means boot is "
+            "blocked.");
+        return 0;
+      }
+      if (argument == "--dump-ir") {
+        dump_ir = true;
+        continue;
+      }
+      if ((argument != "--rom" && argument != "--ios" &&
+           argument != "--budget") ||
+          i + 1 == argc) {
+        std::println(stderr, "boot: invalid option or missing value: {}",
+                     argument);
+        return 1;
+      }
+      i++;
+      if (argument == "--rom")
+        rom = argv[i];
+      else if (argument == "--ios")
+        ios = argv[i];
+      else {
+        const std::string_view text{argv[i]};
+        const let parsed =
+            std::from_chars(text.data(), text.data() + text.size(), budget);
+        if (text.empty() || parsed.ec != std::errc{} ||
+            parsed.ptr != text.data() + text.size()) {
+          std::println(stderr, "boot: invalid instruction budget: {}", text);
+          return 1;
+        }
+      }
+    }
+    return run(rom, ios, budget, dump_ir);
+  } catch (const std::exception &error) {
+    std::println(stderr, "boot: {}", error.what());
+    return 1;
+  }
+}

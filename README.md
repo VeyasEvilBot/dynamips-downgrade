@@ -68,13 +68,140 @@ Hexadecimal instruction words may follow the options to replace the example.
 
 The harness loads and fetches big-endian code at `0x1000`, maps data RAM at
 `0x2000`, and maps console word registers at `0x8000` (TX) and `0x8004` (ready).
-The console captures up to 1024 bytes; writing when full raises a device fault.
-Programs are straight-line blocks of at most 1024 instructions. Supported
-instructions are ORI, XOR, DADDU, LW, SW, LD and SD. Faults report the guest PC
-and address, retain earlier effects, and stop later instructions.
+UART TX and RX each use a bounded 1024-byte FIFO. Status bit 0 indicates TX
+space and bit 1 indicates received data; RX is at `0x8008`. Device owners feed
+RX through `receive()` and drain TX at execution boundaries. Partial drains
+retain the unwritten suffix; a blocked sink yields without spinning. The shared
+`jit.fifo` module can serve other byte-stream devices. It has one owner and does
+not synchronize concurrent producers or consumers.
+
+The playground drains UART output after at most 64 dispatched blocks and flushes
+host output once per nonempty drain. Programs contain at most 1024 instruction
+words and execute with a one-million-instruction budget, stopping at block
+boundaries. Supported instructions are NOP, BEQ, BNE, ORI, XOR, DADDU, LW, SW,
+LD and SD. Branches execute one delay slot; faults in that slot also report the
+branch PC. Faults retain earlier effects and stop later instructions.
+
+Dispatch caches native blocks for an immutable instruction image. Writable
+aliases of executable RAM are rejected. Mapping changes invalidate cached
+blocks; changed instruction bytes require a new dispatcher. Direct host writes
+to executable backing while dispatch is active are forbidden. Architectural
+instruction-cache operations and self-modifying guest code remain future work.
+Mapping owners may use `apply_updates()` to batch and deduplicate cache
+invalidations before resuming execution; earlier successful updates remain
+applied if a later update fails.
 
 Memory IR currently calls typed C++ helpers; inline JIT RAM-cache probing and
 architectural MIPS exceptions remain future work.
+
+`jit.devices` supplies a fixed-capacity MMIO bus. Register devices with a physical
+byte range, supported widths, register byte order, and optional reset/service
+hooks, then map `bus.endpoint()` through guest memory. Registration freezes when
+the endpoint is exposed. The bus borrows devices and hook contexts; keep them
+and the bus alive until guest memory and execution stop using them. Reset and
+service run with guest execution stopped. Reset does not reset CPU or RAM.
+
+`jit.execution` services devices before and after each bounded dispatch slice,
+including after a guest fault. A service failure before execution leaves the CPU
+untouched. A guest fault and a subsequent service failure are both reported.
+Service errors stop the run, and servicing stops at the first failing device.
+Guest state may already have advanced when post-service fails; completed dispatch
+counters are returned only on success. Backpressure is successful servicing
+with queued work retained, rather than a service error.
+Hooks retain pending I/O on backpressure and should enqueue or poll transport
+work rather than wait for input. No device callback performs host I/O on a guest
+load or store.
+
+Try the guest RX-to-TX echo path with supplied UTF-8 bytes:
+
+```nu
+mise run run:jit -- --echo "hello devices"
+mise run run:jit -- --echo "hello" --dump-ir --registers
+```
+
+The echo guest polls status, consumes RX, and transmits each byte through TX.
+Input streams into the bounded RX FIFO between execution slices. This CLI uses
+`std::print`/`std::println` for diagnostic output. For live input, start a
+single-client Unix console in one terminal and connect from another:
+
+```nu
+mise run run:jit -- --console /tmp/dynamips-console.sock
+socat STDIO UNIX-CONNECT:/tmp/dynamips-console.sock
+```
+
+`--console` runs a polling echo guest until the client half-closes its input and
+all received bytes have been echoed. Ctrl-C or SIGTERM stops the server and
+cancels pending I/O. The listener refuses existing paths and removes its own
+socket on shutdown. A new invocation starts a new session; reconnection is not
+part of this first version.
+
+The `host.console` transport owns its Asio reactor and two 8 KiB staging buffers.
+The UART adapter in `src/devices/console.cppm` transfers bytes between those
+buffers and the device FIFOs only at service boundaries. RX pauses while staged
+input is waiting; TX keeps its unwritten suffix through partial completions.
+Shutdown settles cancellation callbacks before buffers are destroyed. Asio may
+allocate operation state; the payload buffers and queues do not grow. Guest
+time and interrupt delivery remain separate next steps.
+
+Reusable host helpers live in `src/host/`: `native_fd` owns and duplicates file
+descriptors, while `host_memory` owns file buffers and aligned allocations.
+Both legacy core and JIT targets share these module objects. The playground
+reserves aligned RAM through the C++ API; `common/host_memory_compat.cpp` retains
+`m_read_file` and `m_memalign` for existing C callers. Existing native archives
+and linker flags remain sufficient.
+
+Focused checks are available without building the Go bindings:
+
+```nu
+mise run test:devices # FIFO, UART backpressure and native dispatch integration
+mise run test:core    # all JIT, device and guest-memory tests
+mise run test:host    # direct C++ host helpers and real C compatibility callers
+mise run test:console # real Unix streams, guest echo, backpressure and cancellation
+mise run check        # policies, native lint, clangd and all native/Go tests
+mise run run:jit -- --dump-ir --registers
+```
+
+The device test runs a real native-compiled guest loop that sends more bytes than
+fit in the FIFO, starts with TX full, and verifies byte order while the host
+accepts short writes and temporarily blocks. Device-bus tests additionally cover
+streamed RX-to-TX echo, register routing, byte order, reset and service failures.
+Core tests also check instruction
+fetch faults across unmapped and non-executable pages, including delay slots.
+
+## C++ chassis boot probe
+
+`machine.core` owns the CPU state, aligned RAM/ROM backing, direct-mapped KSEG0
+and KSEG1 aliases, device bus and ROM dispatcher. A chassis supplies a small
+`machine::definition` and optional `machine::attachment` entries; it does not
+repeat memory allocation, firmware copying, reset or execution-loop setup.
+`machine.c7200` defines the NPE-400/R7000 profile and its hardware register
+windows. Window identifiers such as `c7200::io_fpga` select attachments using
+the existing typed device descriptor. Device objects and hook contexts remain
+owned by the caller and must outlive the machine. Model names and window tables
+are borrowed immutable data; the built-in profile has static storage.
+
+```nu
+mise run run:c7200
+mise run run:c7200 -- --rom /path/to/rom.elf --ios /path/to/ios.image
+mise run test:machine
+```
+
+The probe defaults to the real bundled `stable/mips64_microcode` ELF. Firmware
+loading uses libelf and the shared C++ file helper, checks ELF32 big-endian MIPS
+metadata and section bounds, copies allocated sections, and zeros BSS. IOS
+sections must fit base RAM. The initial NPE-400 profile uses 256 MiB base RAM
+and 4 MiB protected ROM. Missing device windows fault rather than returning
+invented register values. Warm reset clears CPU/device state while retaining RAM
+and loaded firmware.
+
+This is a chassis and boot-path foundation, not a successful IOS boot. The
+current probe stops at reset PC `0xffffffffbfc00000` on `0x0ff004a8` (JAL).
+Exit status 2 reports blocked or budget-limited execution. CP0, general TLB
+translation, C7200 controllers and RAM-code dispatch remain unimplemented.
+Configured processor identity is model metadata, not an implemented CP0 PRID
+register. The ROM dispatcher currently supports an immutable contiguous boot
+window of at most 65536 words; larger images are rejected explicitly. The legacy
+emulator and its public C/Go contracts remain unchanged.
 
 ## Go consumers
 

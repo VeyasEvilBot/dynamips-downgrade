@@ -130,8 +130,10 @@ public:
   [[nodiscard]] fn seal_executable_pages() noexcept
       -> std::expected<void, mapping_error> {
     for (const let &entry : mappings_)
-      if (entry.host && !compatible_code(entry.address, entry.physical,
-                                         entry.permissions, true))
+      if (entry.host && !entry.read_only &&
+          (static_cast<unsigned>(entry.permissions) & 4u) != 0 &&
+          !compatible_code(entry.address, entry.physical, entry.permissions,
+                           true))
         return std::unexpected(mapping_error::physical_conflict);
     sealed_code_ = true;
     return {};
@@ -197,6 +199,24 @@ public:
                 permissions});
   }
 
+  // Borrowed backing stays stable and unmodified while executable code is
+  // active.
+  [[nodiscard]] fn map_rom(virtual_address address, physical_address physical,
+                            std::span<std::byte> backing) noexcept
+      -> std::expected<void, mapping_error> {
+    if (backing.size() != page_size)
+      return std::unexpected(mapping_error::invalid_physical_range);
+    if (physical.value < ram_.size())
+      return std::unexpected(mapping_error::physical_conflict);
+    const let begin = reinterpret_cast<std::uintptr_t>(backing.data());
+    const let ram = reinterpret_cast<std::uintptr_t>(ram_.data());
+    if (!ram_.empty() && ((begin >= ram && begin - ram < ram_.size()) ||
+                          (ram >= begin && ram - begin < page_size)))
+      return std::unexpected(mapping_error::physical_conflict);
+    return map({address, physical, backing.data(), nullptr,
+                permission::read | permission::execute, true});
+  }
+
   [[nodiscard]] fn map_device(virtual_address address,
                                physical_address physical, device &target,
                                permission permissions) noexcept
@@ -206,10 +226,6 @@ public:
     if ((static_cast<unsigned>(permissions) &
          static_cast<unsigned>(permission::execute)) != 0)
       return std::unexpected(mapping_error::invalid_permissions);
-    for (const let &entry : mappings_)
-      if (entry.address.value != address.value &&
-          entry.physical.value == physical.value && entry.target != &target)
-        return std::unexpected(mapping_error::physical_conflict);
     return map({address, physical, nullptr, &target, permissions});
   }
 
@@ -235,6 +251,8 @@ public:
     const let found = find(address);
     if (found == mappings_.end() || found->address.value != address.value)
       return std::unexpected(mapping_error::not_mapped);
+    if (found->read_only && (static_cast<unsigned>(permissions) & 2u) != 0)
+      return std::unexpected(mapping_error::invalid_permissions);
     if (found->target && (static_cast<unsigned>(permissions) &
                           static_cast<unsigned>(permission::execute)) != 0)
       return std::unexpected(mapping_error::invalid_permissions);
@@ -326,6 +344,7 @@ private:
     std::byte *host;
     device *target;
     permission permissions;
+    bool read_only = false;
   };
 
   struct resolved_access {
@@ -413,6 +432,13 @@ private:
     if (value.host && !compatible_code(value.address, value.physical,
                                        value.permissions, sealed_code_))
       return std::unexpected(mapping_error::physical_conflict);
+    if (value.physical.value >= ram_.size())
+      for (const let &entry : mappings_)
+        if (entry.address.value != value.address.value &&
+            entry.physical.value == value.physical.value &&
+            (entry.host != value.host || entry.target != value.target ||
+             entry.read_only != value.read_only))
+          return std::unexpected(mapping_error::physical_conflict);
     const let found = find(value.address);
     if (found != mappings_.end() &&
         found->address.value == value.address.value) {

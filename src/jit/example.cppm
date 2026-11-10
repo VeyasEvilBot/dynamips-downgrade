@@ -74,6 +74,31 @@ constexpr fn bit_xor(reg target, reg left, reg right) noexcept
   return binary(0x26, target, left, right);
 }
 
+export constexpr fn echo_program(std::uint16_t length) noexcept {
+  return std::array{ori(reg::console, 0x8000),
+                    ori(reg::ram, 3),
+                    ori(reg::left, 0),
+                    ori(reg::right, length),
+                    ori(reg::sum, 1),
+                    immediate(4, reg::zero, reg::right, 9),
+                    mips64::instruction_word{0},
+                    lw(reg::status, reg::console, 4),
+                    immediate(5, reg::ram, reg::status, 0xfffe),
+                    mips64::instruction_word{0},
+                    lw(reg::value, reg::console, 8),
+                    sw(reg::value, reg::console, 0),
+                    daddu(reg::left, reg::left, reg::sum),
+                    immediate(5, reg::right, reg::left, 0xfff9),
+                    mips64::instruction_word{0}};
+}
+
+export constexpr fn echo_loop() noexcept {
+  let words = echo_program(0);
+  words[5] = {0}; // Live input has no fixed byte count.
+  words[13] = immediate(4, reg::zero, reg::zero, 0xfff9);
+  return words;
+}
+
 export inline constexpr std::array program{
     ori(reg::console, 0x8000),
     ori(reg::ram, 0x2000),
