@@ -28,6 +28,11 @@ run = "xmake build -y jit-test && xmake run jit-test"
 description = "run the Go binding tests"
 depends = ["test:go"]
 
+[tasks."test:memory"]
+description = "test two-level guest memory access and faults"
+run = "xmake build -y memory-test && xmake run memory-test"
+
+
 [tasks."build:native"]
 description = "build and install the native embedding libraries"
 run = "xmake f -m debug --system_packages=y -y && xmake build -j \"${DYNAMIPS_BUILD_JOBS:-14}\" -y dynamips-bindings && xmake install -o \"$PWD/build/install\" dynamips-bindings dynamips-core"
@@ -119,7 +124,7 @@ PKG_CONFIG_PATH="$PWD/build/install/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG
 [tasks.compiledb]
 description = "generate clangd compile commands for C and C++ sources"
 depends = ["build:native"]
-run = "xmake build -y jit-playground jit-test dynamips-module-test && xmake project -k compile_commands --lsp=clangd ."
+run = "xmake build -y jit-playground jit-test memory-test dynamips-module-test && xmake project -k compile_commands --lsp=clangd ."
 
 [tasks.format]
 description = "format C and C++ sources"
