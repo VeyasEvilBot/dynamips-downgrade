@@ -32,6 +32,9 @@ depends = ["test:go"]
 description = "test two-level guest memory access and faults"
 run = "xmake build -y memory-test && xmake run memory-test"
 
+[tasks."bench:memory"]
+description = "benchmark release RAM access against the real legacy MTS callback"
+run = "xmake f -m release --system_packages=y -y && xmake build -j 14 -y memory-bench && xmake run memory-bench"
 
 [tasks."build:native"]
 description = "build and install the native embedding libraries"
@@ -124,11 +127,11 @@ PKG_CONFIG_PATH="$PWD/build/install/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG
 [tasks.compiledb]
 description = "generate clangd compile commands for C and C++ sources"
 depends = ["build:native"]
-run = "xmake build -y jit-playground jit-test memory-test dynamips-module-test && xmake project -k compile_commands --lsp=clangd ."
+run = "xmake build -y jit-playground jit-test memory-test memory-bench dynamips-module-test && xmake project -k compile_commands --lsp=clangd ."
 
 [tasks.format]
 description = "format C and C++ sources"
-run = "find bindings common stable include modules src tests -type f \\( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cppm' \\) -print0 | xargs -0 clang-format -i"
+run = "find bindings common stable include modules src tests benchmarks -type f \\( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cppm' \\) -print0 | xargs -0 clang-format -i"
 
 [tasks."fmt:go"]
 description = "format Go code"
