@@ -61,7 +61,30 @@ enum class mapping_error {
   physical_conflict,
   capacity_exhausted,
   not_mapped,
-  out_of_memory
+  out_of_memory,
+  invalid_operation
+};
+
+enum class update_kind : std::uint8_t { ram, device, protect, unmap };
+struct device;
+
+struct mapping_update {
+  update_kind kind;
+  virtual_address address;
+  physical_address physical{};
+  permission permissions = permission::read;
+  device *target = nullptr;
+};
+
+struct update_error {
+  std::size_t index;
+  mapping_error reason;
+};
+
+struct update_result {
+  std::size_t applied;
+  std::size_t invalidated_pages;
+  bool full_flush;
 };
 enum class device_error : std::uint8_t { unsupported_size, bus };
 
@@ -98,6 +121,45 @@ public:
   static constexpr std::size_t second_level_entries = 4096;
   address_space(const address_space &) = delete;
   fn operator=(const address_space &) -> address_space & = delete;
+
+  fn mapping_generation() const noexcept -> std::uint64_t {
+    return generation_;
+  }
+
+  // Successful edits remain applied if a later edit fails. All invalidations
+  // finish before returning; no guest access can observe an unflushed batch.
+  [[nodiscard]] fn
+  apply_updates(std::span<const mapping_update> updates) noexcept
+      -> std::expected<update_result, update_error> {
+    invalidation_batch batch{*this};
+    for (std::size_t i = 0; i < updates.size(); i++) {
+      const let &update = updates[i];
+      std::expected<void, mapping_error> result;
+      switch (update.kind) {
+      case update_kind::ram:
+        result = map_ram(update.address, update.physical, update.permissions);
+        break;
+      case update_kind::device:
+        result = update.target
+                     ? map_device(update.address, update.physical,
+                                  *update.target, update.permissions)
+                     : std::unexpected(mapping_error::invalid_operation);
+        break;
+      case update_kind::protect:
+        result = protect(update.address, update.permissions);
+        break;
+      case update_kind::unmap:
+        result = unmap(update.address);
+        break;
+      default:
+        result = std::unexpected(mapping_error::invalid_operation);
+        break;
+      }
+      if (!result)
+        return std::unexpected(update_error{i, result.error()});
+    }
+    return update_result{updates.size(), batch.count, batch.full};
+  }
 
   [[nodiscard]] static fn create(std::span<std::byte> ram,
                                   std::size_t mapping_capacity) noexcept
@@ -175,6 +237,7 @@ public:
       std::ranges::fill(table, cache_entry{});
     for (let &table : second_)
       std::ranges::fill(table, cache_entry{});
+    generation_++;
   }
 
   template <std::unsigned_integral T, std::endian Order = std::endian::big>
@@ -207,6 +270,42 @@ public:
   }
 
 private:
+  struct invalidation_batch {
+    address_space &owner;
+    std::array<virtual_address, 64> pages;
+    std::size_t count = 0;
+    bool full = false;
+
+    explicit invalidation_batch(address_space &space) noexcept : owner(space) {
+      owner.batch_ = this;
+    }
+
+    ~invalidation_batch() {
+      owner.batch_ = nullptr;
+      if (full)
+        owner.invalidate();
+      else if (count != 0) {
+        for (std::size_t i = 0; i < count; i++)
+          owner.invalidate_page(pages[i]);
+        owner.generation_++;
+      }
+    }
+
+    fn enqueue(virtual_address address) noexcept -> void {
+      if (full)
+        return;
+      for (std::size_t i = 0; i < count; i++)
+        if (pages[i].value == address.value)
+          return;
+      if (count == pages.size()) {
+        full = true;
+        return;
+      }
+      pages[count] = address;
+      count++;
+    }
+  };
+
   struct mapping {
     virtual_address address;
     physical_address physical;
@@ -228,6 +327,8 @@ private:
   std::span<std::byte> ram_;
   std::vector<mapping> mappings_;
   std::size_t mapping_limit_ = 0;
+  std::uint64_t generation_ = 0;
+  invalidation_batch *batch_ = nullptr;
 
   explicit address_space(std::span<std::byte> ram) noexcept : ram_(ram) {}
 
@@ -250,6 +351,15 @@ private:
   }
 
   fn invalidate(virtual_address address) noexcept -> void {
+    if (batch_) {
+      batch_->enqueue(address);
+      return;
+    }
+    invalidate_page(address);
+    generation_++;
+  }
+
+  fn invalidate_page(virtual_address address) noexcept -> void {
     const let page = address.value / page_size;
     const let tag = address.value | 1;
     for (let &table : first_)

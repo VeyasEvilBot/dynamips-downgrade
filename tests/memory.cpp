@@ -238,4 +238,37 @@ fn main() -> int {
           "mapping never grows past startup capacity");
   std::println("memory: RAM, endian, cache levels, invalidation, permissions "
                "and MMIO checks passed");
+  let batched = mem::address_space::create(ram, 80);
+  require(batched.has_value(), "create batch memory");
+  std::array<mem::mapping_update, 70> updates;
+  for (std::size_t i = 0; i < updates.size(); i++)
+    updates[i] = {mem::update_kind::ram, {i * mem::page_size}, {0}, rw};
+  const let initial_generation = (*batched)->mapping_generation();
+  const let batch = (*batched)->apply_updates(updates);
+  require(batch && batch->applied == 70 && batch->full_flush &&
+              (*batched)->mapping_generation() == initial_generation + 1,
+          "large batch uses one bounded full flush");
+  require((*batched)->store<std::uint32_t>({0}, 7).has_value() &&
+              (*batched)->load<std::uint32_t>({0}) == 7,
+          "warm batch cache");
+  constexpr std::array repeated{
+      mem::mapping_update{
+          mem::update_kind::protect, {0}, {}, mem::permission::read},
+      mem::mapping_update{mem::update_kind::protect, {0}, {}, rw},
+      mem::mapping_update{
+          mem::update_kind::protect, {0}, {}, mem::permission::read}};
+  const let generation = (*batched)->mapping_generation();
+  const let deduplicated = (*batched)->apply_updates(repeated);
+  require(deduplicated && deduplicated->invalidated_pages == 1 &&
+              !deduplicated->full_flush &&
+              (*batched)->mapping_generation() == generation + 1 &&
+              !(*batched)->store<std::uint32_t>({0}, 8),
+          "duplicate invalidations are coalesced before access");
+  constexpr std::array failing{
+      mem::mapping_update{mem::update_kind::unmap, {0}},
+      mem::mapping_update{mem::update_kind::unmap, {1}}};
+  const let failed_batch = (*batched)->apply_updates(failing);
+  require(!failed_batch && failed_batch.error().index == 1 &&
+              !(*batched)->load<std::uint32_t>({0}),
+          "failed batch still flushes earlier edits");
 }
