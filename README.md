@@ -56,8 +56,13 @@ and focused Clang analysis. Run `mise run compiledb` to prepare clangd.
 
 ## JIT playground
 
-`mise run run:jit` runs a native-compiled MIPS program that writes `hello` through
-an MMIO console, reads its ready status, and stores and loads a RAM word.
+`mise run run:jit` runs a native-compiled MIPS program that stores two 64-bit
+operands in RAM, loads and adds them, and checks the stored result using a
+negative-offset load and XOR. It builds a word-sized text buffer in RAM and
+transmits `sum=6` through the MMIO console, reading ready status before each
+write. The final summary shows the sum, readback check and saved status.
+The readable instruction recipe is in `src/jit/example.cppm`; it uses only the
+existing instruction subset, so transmission is unrolled rather than a loop.
 Use `mise run run:jit -- --dump-ir --registers` to inspect IR and final registers.
 Hexadecimal instruction words may follow the options to replace the example.
 

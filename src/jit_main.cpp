@@ -16,6 +16,7 @@ import jit.mips64;
 import jit.amd64;
 import jit.memory;
 import jit.uart;
+import jit.example;
 
 namespace {
 namespace ir = jit::ir;
@@ -38,7 +39,7 @@ fn fault_name(jit::memory::fault_reason reason) noexcept -> std::string_view {
 }
 
 fn run(std::span<const mips::instruction_word> words, bool dump_ir,
-         bool registers) -> int {
+         bool registers, bool example = false) -> int {
   constexpr mips::guest_address start{0x1000};
   if (words.size() > jit::memory::page_size / sizeof(std::uint32_t)) {
     std::println(stderr,
@@ -160,6 +161,17 @@ fn run(std::span<const mips::instruction_word> words, bool dump_ir,
                state.pc.value);
   std::println("MMIO console:\n{}",
                console.output().empty() ? "(no output)" : console.output());
+  if (example) {
+    const let sum = guest.load<std::uint64_t>({0x2010});
+    const let check = guest.load<std::uint32_t>({0x2018});
+    const let ready = guest.load<std::uint32_t>({0x201c});
+    if (!sum || !check || !ready) {
+      std::println(stderr, "jit: cannot inspect example results");
+      return 1;
+    }
+    std::println("RAM: sum={}, readback XOR={}, UART ready={}", *sum, *check,
+                 *ready);
+  }
   if (registers)
     state.print();
   return 0;
@@ -177,7 +189,7 @@ fn main(int argc, char **argv) -> int {
       if (text == "--help") {
         std::println(
             "Usage: jit-playground [--dump-ir] [--registers] [HEX_WORD ...]\n"
-            "Run the MMIO hello example, or a straight-line MIPS program.\n"
+            "Run the RAM sum/MMIO example, or a straight-line MIPS program.\n"
             "Code: 0x1000; RAM: 0x2000; MMIO TX: 0x8000; status: 0x8004.\n"
             "Supported: ORI, XOR, DADDU, LW, SW, LD, SD. Registers start at "
             "zero.");
@@ -206,17 +218,7 @@ fn main(int argc, char **argv) -> int {
     }
     if (!words.empty())
       return run(words, dump_ir, registers);
-    constexpr std::array example{
-        mips::instruction_word{0x34018000}, mips::instruction_word{0x34020068},
-        mips::instruction_word{0xac220000}, mips::instruction_word{0x34020065},
-        mips::instruction_word{0xac220000}, mips::instruction_word{0x3402006c},
-        mips::instruction_word{0xac220000}, mips::instruction_word{0x3402006c},
-        mips::instruction_word{0xac220000}, mips::instruction_word{0x3402006f},
-        mips::instruction_word{0xac220000}, mips::instruction_word{0x3402000a},
-        mips::instruction_word{0xac220000}, mips::instruction_word{0x8c230004},
-        mips::instruction_word{0x34042000}, mips::instruction_word{0xac820000},
-        mips::instruction_word{0x8c850000}};
-    return run(example, dump_ir, registers);
+    return run(jit::example::program, dump_ir, registers, true);
   } catch (const std::exception &error) {
     std::println(stderr, "jit: {}", error.what());
     return 1;

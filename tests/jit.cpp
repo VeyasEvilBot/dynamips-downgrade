@@ -17,6 +17,7 @@ import jit.mips64;
 import jit.amd64;
 import jit.memory;
 import jit.uart;
+import jit.example;
 
 namespace {
 namespace ir = jit::ir;
@@ -403,6 +404,47 @@ fn mmio_console() -> void {
               console.output().size() == jit::uart::capacity,
           "full console faults without overwriting the buffer");
 }
+fn example_program() -> void {
+  namespace mem = jit::memory;
+  for (unsigned pass = 0; pass < 2; pass++) {
+    std::array<std::byte, mem::page_size> ram{};
+    jit::uart console{{0x100000}};
+    let memory = mem::address_space::create(ram, 2);
+    require(memory.has_value(), "create example memory");
+    constexpr let rw = mem::permission::read | mem::permission::write;
+    require((*memory)->map_ram({0x2000}, {0}, rw).has_value() &&
+                (*memory)
+                    ->map_device({0x8000}, {0x100000}, console.endpoint(), rw)
+                    .has_value(),
+            "map example RAM and console");
+    alignas(std::max_align_t) std::array<std::byte, 64 * 1024> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    let block = mips::translate(jit::example::program, {0x1000}, arena);
+    require(block.has_value(), "translate complex example");
+    if (pass != 0)
+      require(ir::optimize(*block, ir::fold_constants).has_value(),
+              "optimize complex example");
+    let compiler = amd64::compiler::create();
+    require(compiler.has_value(), "create example compiler");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile complex example");
+    std::array<std::uint64_t, 32> state{};
+    const let result = native->run(state, **memory);
+    require(result && *result == 0x1000 + jit::example::program.size() * 4 &&
+                console.output() == "sum=6\n" && state[7] == 6 &&
+                state[8] == 6 && state[10] == 0,
+            "complex example computes and transmits the result");
+    require((*memory)->load<std::uint64_t>({0x2000}) == 4 &&
+                (*memory)->load<std::uint64_t>({0x2008}) == 2 &&
+                (*memory)->load<std::uint64_t>({0x2010}) == 6 &&
+                (*memory)->load<std::uint32_t>({0x2018}) == 0 &&
+                (*memory)->load<std::uint32_t>({0x201c}) == 1 &&
+                (*memory)->load<std::uint32_t>({0x2050}) == '6',
+            "example leaves operands, sum, check, status and output in RAM");
+  }
+}
+
 } // namespace
 
 fn main() -> int {
@@ -412,6 +454,7 @@ fn main() -> int {
   observed_stores();
   memory_operations();
   mmio_console();
+  example_program();
   std::println(
       "jit: native lowering, differential and ownership checks passed");
 }
