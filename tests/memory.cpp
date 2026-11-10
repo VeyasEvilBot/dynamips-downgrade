@@ -12,6 +12,8 @@
 #include <dynamips/macros.h>
 
 import jit.memory;
+import jit.fifo;
+import jit.uart;
 
 namespace {
 namespace mem = jit::memory;
@@ -70,7 +72,88 @@ fn roundtrip(mem::address_space &memory, T value) -> void {
 }
 } // namespace
 
+fn fifo_io() -> void {
+  jit::byte_fifo<8> queue;
+  constexpr std::array first{std::byte{1}, std::byte{2}, std::byte{3},
+                             std::byte{4}, std::byte{5}, std::byte{6}};
+  require(queue.write(first) == 6 && queue.consume(4).has_value(),
+          "FIFO prefix consumption");
+  constexpr std::array second{std::byte{7},  std::byte{8},  std::byte{9},
+                              std::byte{10}, std::byte{11}, std::byte{12}};
+  require(queue.write(second) == 6 && !queue.push(std::byte{13}),
+          "bounded ring wrap and full detection");
+  std::array<std::byte, 8> collected;
+  std::size_t written = 0;
+  unsigned calls = 0;
+  const let partial = queue.drain([&](std::span<const std::byte> bytes) noexcept
+                                      -> std::expected<std::size_t, int> {
+    calls++;
+    if (calls == 2)
+      return std::unexpected(7);
+    for (std::size_t i = 0; i < 2; i++)
+      collected[written++] = bytes[i];
+    return 2;
+  });
+  require(!partial && partial.error().transferred == 2 && queue.size() == 6,
+          "partial drain retains unwritten suffix on error");
+  const let stalled =
+      queue.drain([](std::span<const std::byte>) noexcept
+                      -> std::expected<std::size_t, int> { return 0; });
+  require(stalled && *stalled == 0 && queue.size() == 6,
+          "zero progress yields without spinning");
+  const let invalid = queue.drain(
+      [](std::span<const std::byte> bytes) noexcept
+          -> std::expected<std::size_t, int> { return bytes.size() + 1; });
+  require(!invalid && queue.size() == 6 && !queue.consume(9),
+          "reject invalid sink counts without dropping data");
+  calls = 0;
+  const let drained = queue.drain([&](std::span<const std::byte> bytes) noexcept
+                                      -> std::expected<std::size_t, int> {
+    calls++;
+    for (const let byte : bytes)
+      collected[written++] = byte;
+    return bytes.size();
+  });
+  require(drained && *drained == 6 && calls == 2 && queue.size() == 0 &&
+              !queue.pop(),
+          "wrapped FIFO drains in contiguous batches");
+  for (std::size_t i = 0; i < collected.size(); i++)
+    require(collected[i] == static_cast<std::byte>(i + 5),
+            "FIFO order survives partial writes and wrap");
+
+  jit::uart uart{{0x100000}};
+  let space = mem::address_space::create({}, 1);
+  require(space &&
+              (*space)
+                  ->map_device({0x8000}, {0x100000}, uart.endpoint(),
+                               mem::permission::read | mem::permission::write)
+                  .has_value(),
+          "map queued UART");
+  constexpr std::array input{std::byte{65}, std::byte{66}};
+  require(uart.receive(input) == 2 &&
+              (*space)->load<std::uint32_t>({0x8004}) == 3,
+          "RX FIFO advertises input readiness");
+  require((*space)->load<std::uint32_t>({0x8008}) == 65 &&
+              (*space)->load<std::uint32_t>({0x8008}) == 66 &&
+              (*space)->load<std::uint32_t>({0x8004}) == 1 &&
+              !(*space)->load<std::uint32_t>({0x8008}),
+          "RX reads consume bytes and report empty input");
+  for (std::size_t i = 0; i < jit::uart::capacity; i++)
+    require((*space)
+                ->store<std::uint32_t>({0x8000},
+                                       static_cast<std::uint32_t>(i & 255))
+                .has_value(),
+            "fill TX FIFO");
+  const let drain = uart.drain(
+      [](std::span<const std::byte> bytes) noexcept
+          -> std::expected<std::size_t, int> { return bytes.size(); });
+  require(drain && *drain == jit::uart::capacity && uart.pending() == 0 &&
+              (*space)->load<std::uint32_t>({0x8004}) == 1,
+          "draining restores TX readiness");
+}
+
 fn main() -> int {
+  fifo_io();
   std::array<std::byte, 3 * mem::page_size> ram{};
   let created = mem::address_space::create(ram, 8);
   require(created.has_value(), "create bounded address space");
