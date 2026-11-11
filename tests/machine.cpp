@@ -450,8 +450,8 @@ fn real_rom(const char *path) -> bool {
                std::string_view{output[1].data(), written[1]});
   return check(
       error.code == jit::dispatch_error_code::translation &&
-          error.pc == 0xffffffffbfc00668ULL &&
-          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x67bdffc0 &&
+          error.pc == 0xffffffffbfc00670ULL &&
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x03a8e824 &&
           (*board)->cpu().registers[29] == 0xffffffff80003fc8ULL &&
           (*board)->cpu().cop0.registers[9] == 0 &&
           (*board)->cpu().cop0.registers[11] == 1000000 &&

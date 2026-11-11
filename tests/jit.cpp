@@ -60,7 +60,7 @@ fn differential() -> void {
       const let rs = static_cast<std::uint32_t>(next(seed) & 31);
       const let rt = static_cast<std::uint32_t>(next(seed) & 31);
       const let rd = static_cast<std::uint32_t>(next(seed) & 31);
-      switch (next(seed) % 8) {
+      switch (next(seed) % 9) {
       case 0: {
         const let immediate = static_cast<std::uint32_t>(next(seed) & 0xffff);
         word.bits = (0x0du << 26) | (rs << 21) | (rt << 16) | immediate;
@@ -78,6 +78,14 @@ fn differential() -> void {
         if (rd != 0)
           expected[rd] = read(rs) + read(rt);
         break;
+      case 8: {
+        const let immediate = static_cast<std::uint32_t>(next(seed) & 0xffff);
+        word.bits = (0x19u << 26) | (rs << 21) | (rt << 16) | immediate;
+        if (rt != 0)
+          expected[rt] = read(rs) + static_cast<std::uint64_t>(std::int64_t{
+                                        static_cast<std::int16_t>(immediate)});
+        break;
+      }
       case 7: {
         const let immediate = static_cast<std::uint32_t>(next(seed) & 0xffff);
         word.bits = (0x0bu << 26) | (rs << 21) | (rt << 16) | immediate;
