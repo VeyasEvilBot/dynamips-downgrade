@@ -154,7 +154,8 @@ struct error {
     const bool indirect = opcode == 0 && function == 8;
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift &&
-        !(opcode == 0 && (function == 0x26 || function == 0x2d)))
+        !(opcode == 0 &&
+          (function == 0x24 || function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift && ((bits >> 6) & 31) != 0)
@@ -338,6 +339,7 @@ struct error {
                           : opcode == 0x0c    ? ir::binary_kind::bit_and
                           : (addiu || daddiu) ? ir::binary_kind::add_wrap
                           : immediate         ? ir::binary_kind::bit_or
+                          : function == 0x24  ? ir::binary_kind::bit_and
                           : function == 0x26 ? ir::binary_kind::bit_xor
                                              : ir::binary_kind::add_wrap;
     let value =
