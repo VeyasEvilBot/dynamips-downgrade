@@ -38,6 +38,7 @@ enum class width : std::uint8_t { bits32 = 32, bits64 = 64 };
 enum class opcode : std::uint8_t {
   constant,
   read_state,
+  shift_right32,
   sign_extend32,
   signed_less,
   add_wrap,
@@ -73,7 +74,13 @@ struct operands {
   value_id right;
 };
 
+struct shift_operand {
+  value_id value;
+  std::uint32_t amount;
+};
+
 union payload {
+  shift_operand shift;
   std::uint64_t immediate;
   operands inputs;
 };
@@ -93,6 +100,15 @@ struct node {
   static constexpr fn read(state_slot slot, std::uint32_t source) noexcept
       -> node {
     return {{.immediate = 0}, source, slot, opcode::read_state, width::bits64};
+  }
+
+  static constexpr fn shift_right32(value_id value, std::uint32_t amount,
+                                     std::uint32_t source) noexcept -> node {
+    return {{.shift = {value, amount}},
+            source,
+            {},
+            opcode::shift_right32,
+            width::bits64};
   }
 
   static constexpr fn sign_extend32(value_id value,
@@ -443,6 +459,13 @@ private:
           !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::shift_right32:
+      if (current.type != width::bits64)
+        return fail(error_code::invalid_type);
+      if (!operand_valid(current.data.shift.value) ||
+          current.data.shift.amount > 31)
+        return fail(error_code::invalid_operand);
+      break;
     case opcode::sign_extend32:
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
@@ -492,6 +515,11 @@ private:
       case opcode::constant:
         out = std::format_to(out, "  %v{} = const i{} {}", i, bits,
                              current.data.immediate);
+        break;
+      case opcode::shift_right32:
+        out = std::format_to(out, "  %v{} = lshr.i32.sext %v{}, {}", i,
+                             current.data.shift.value.index,
+                             current.data.shift.amount);
         break;
       case opcode::sign_extend32:
         out = std::format_to(out, "  %v{} = sext.i32 i64 %v{}", i,
@@ -581,6 +609,18 @@ private:
     return std::unexpected(valid.error());
   std::size_t folded = 0;
   for (let &current : value.edit_nodes()) {
+    if (current.op == opcode::shift_right32) {
+      const let &input = value.nodes()[current.data.shift.value.index];
+      if (input.op == opcode::constant) {
+        const let word = static_cast<std::uint32_t>(input.data.immediate) >>
+                         current.data.shift.amount;
+        current = node::constant(static_cast<std::uint64_t>(std::int64_t{
+                                     std::bit_cast<std::int32_t>(word)}),
+                                 current.source_index);
+        folded++;
+      }
+      continue;
+    }
     if (current.op == opcode::sign_extend32) {
       const let &input = value.nodes()[current.data.inputs.left.index];
       if (input.op == opcode::constant) {

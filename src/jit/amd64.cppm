@@ -260,6 +260,7 @@ public:
           observed[node.slot.index] = 0;
           break;
         case ir::opcode::constant:
+        case ir::opcode::shift_right32:
         case ir::opcode::sign_extend32:
         case ir::opcode::signed_less:
         case ir::opcode::add_wrap:
@@ -472,6 +473,18 @@ public:
         switch (node.op) {
         case ir::opcode::constant:
           break;
+        case ir::opcode::shift_right32: {
+          const let input = operand(node.data.shift.value);
+          if (!input)
+            return failure(input.error(), i);
+          status = output.mov(result.r32(), input->r32());
+          if (!status)
+            status =
+                output.shr(result.r32(), asmjit::Imm{node.data.shift.amount});
+          if (!status)
+            status = output.movsxd(result, result.r32());
+          break;
+        }
         case ir::opcode::sign_extend32: {
           const let input = operand(node.data.inputs.left);
           if (!input)
