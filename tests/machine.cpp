@@ -281,17 +281,19 @@ fn real_rom(const char *path) -> bool {
           "real C7200 ROM reaches the current CPU implementation boundary"))
     return false;
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
-  return check(
-      error.code == jit::dispatch_error_code::translation &&
-          error.pc == 0xffffffffbfc01224ULL &&
-          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x03e00008 &&
-          (*board)->cpu().registers[29] == 0xffffffff80003f78ULL &&
-          (*board)->cpu().registers[5] == 'R' &&
-          (*board)->cpu().registers[31] == 0xffffffffbfc00c20ULL &&
-          (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
-              0xffffffffbfc00008ULL &&
-          (*board)->cpu().pc.value == 0xffffffffbfc01220ULL,
-      "ROM calls its character output routine and reaches JR");
+  return check(error.code == jit::dispatch_error_code::memory &&
+                   error.pc == 0xffffffffbfc01228ULL &&
+                   error.branch_pc == 0xffffffffbfc01224ULL &&
+                   error.access.address.value == 0xffffffffb6000040ULL &&
+                   error.access.access == jit::memory::access_kind::write &&
+                   (*board)->cpu().registers[29] == 0xffffffff80003f78ULL &&
+                   (*board)->cpu().registers[5] == 'R' &&
+                   (*board)->cpu().registers[31] == 0xffffffffbfc00c20ULL &&
+                   (*board)->memory().load<std::uint64_t>(
+                       {0xffffffff80003ff8ULL}) == 0xffffffffbfc00008ULL &&
+                   (*board)->cpu().pc.value == error.pc,
+               "ROM reaches its first character write through the C7200 "
+               "ROM-service window");
 }
 } // namespace
 

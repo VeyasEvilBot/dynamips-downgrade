@@ -651,6 +651,50 @@ fn branch_likely() -> void {
   }
 }
 
+fn register_jump() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create register jump compiler");
+  for (unsigned scenario = 0; scenario < 2; scenario++) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{
+        mips::instruction_word{0x03e00008},
+        mips::instruction_word{scenario == 0 ? 0x341f0007u : 0xdc220000u}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block && block->indirect(), "translate JR");
+    require(ir::optimize(*block, ir::fold_constants).has_value(),
+            "optimize JR");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile JR");
+    std::array<std::byte, mem::page_size> ram{};
+    let memory = mem::address_space::create(ram, 1);
+    require(memory.has_value(), "create JR memory");
+    std::array<std::uint64_t, 32> state{};
+    state[31] = 0xffffffffbfc00c20ULL;
+    state[1] = 0x9000;
+    const let result = native->run(state, **memory);
+    if (scenario == 0)
+      require(result && *result == 0xffffffffbfc00c20ULL && state[31] == 7,
+              "JR captures target before delay slot overwrites the register");
+    else
+      require(!result && result.error().pc == 0x1004 &&
+                  result.error().branch_pc == 0x1000,
+              "JR slot faults retain branch PC");
+    const let missing =
+        mips::translate(std::span{words}.first(1), {0x1000}, arena);
+    require(!missing &&
+                missing.error().code == mips::error_code::missing_delay_slot,
+            "JR requires a delay slot");
+    const std::array invalid{mips::instruction_word{0x03e10008}, words[1]};
+    const let rejected = mips::translate(invalid, {0x1000}, arena);
+    require(!rejected &&
+                rejected.error().code == mips::error_code::invalid_encoding,
+            "JR rejects reserved register fields");
+  }
+}
+
 fn direct_jump() -> void {
   alignas(std::max_align_t) std::array<std::byte, 8192> storage;
   std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
@@ -959,6 +1003,7 @@ fn main(int argc, char **argv) -> int {
   example_program();
   branches_and_dispatch();
   branch_likely();
+  register_jump();
   direct_jump();
   jump_and_link();
   instruction_fetch_faults();

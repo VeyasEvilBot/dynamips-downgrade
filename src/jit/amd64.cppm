@@ -494,6 +494,13 @@ public:
       if (const let *jump = block.jump())
         if (const let status = output.mov(next_pc, asmjit::Imm{jump->target}))
           return failure(status, block.nodes().size());
+      if (const let *jump = block.indirect()) {
+        const let target = operand(jump->target);
+        if (!target)
+          return failure(target.error(), block.nodes().size());
+        if (const let status = output.mov(next_pc, *target))
+          return failure(status, block.nodes().size());
+      }
       if (const let status = output.ret(next_pc))
         return failure(status, block.nodes().size());
       if (const let status = output.endFunc())

@@ -33,7 +33,8 @@ constexpr fn is_branch(instruction_word word) noexcept -> bool {
 }
 
 constexpr fn has_delay_slot(instruction_word word) noexcept -> bool {
-  return is_branch(word) || word.bits >> 26 == 2 || word.bits >> 26 == 3;
+  return is_branch(word) || word.bits >> 26 == 2 || word.bits >> 26 == 3 ||
+         (word.bits >> 26 == 0 && (word.bits & 63) == 8);
 }
 
 constexpr fn jump_target(instruction_word word, guest_address pc) noexcept
@@ -130,16 +131,19 @@ struct error {
     const bool memory_access = load || store;
     const bool branch = is_branch(words[i]);
     const bool jump = opcode == 2 || opcode == 3;
-    if (!immediate && !memory_access && !branch && !jump &&
+    const bool indirect = opcode == 0 && function == 8;
+    if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !(opcode == 0 && (function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
-    if (!immediate && !memory_access && !branch && !jump &&
+    if (!immediate && !memory_access && !branch && !jump && !indirect &&
         ((bits >> 6) & 31) != 0)
+      return std::unexpected(error{error_code::invalid_encoding, i});
+    if (indirect && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0))
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (lui && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = immediate || memory_access ? rt : rd;
-    if (destination == 0 && !memory_access && !branch && !jump)
+    if (destination == 0 && !memory_access && !branch && !jump && !indirect)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -193,6 +197,11 @@ struct error {
     const let left = read(rs);
     if (!left)
       return failed(left.error());
+    if (indirect) {
+      if (let exit = result.set_indirect({*left, source}); !exit)
+        return failed(exit.error());
+      continue;
+    }
     if (branch) {
       const let right = read(rt);
       if (!right)

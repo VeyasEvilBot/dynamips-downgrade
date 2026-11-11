@@ -182,7 +182,13 @@ struct jump_exit {
   std::uint32_t source_index;
 };
 
-using block_exit = std::variant<std::monostate, branch_exit, jump_exit>;
+struct indirect_exit {
+  value_id target;
+  std::uint32_t source_index;
+};
+
+using block_exit =
+    std::variant<std::monostate, branch_exit, jump_exit, indirect_exit>;
 
 class block {
 public:
@@ -247,10 +253,16 @@ public:
     return std::get_if<jump_exit>(&exit_);
   }
 
+  fn indirect() const noexcept -> const indirect_exit * {
+    return std::get_if<indirect_exit>(&exit_);
+  }
+
   fn branch_pc() const noexcept -> std::optional<std::uint64_t> {
     if (const let *value = branch())
       return info_.start_pc + std::uint64_t{value->source_index} * 4;
     if (const let *value = jump())
+      return info_.start_pc + std::uint64_t{value->source_index} * 4;
+    if (const let *value = indirect())
       return info_.start_pc + std::uint64_t{value->source_index} * 4;
     return std::nullopt;
   }
@@ -276,6 +288,11 @@ public:
     return set_exit(exit);
   }
 
+  [[nodiscard]] fn set_indirect(indirect_exit exit) noexcept
+      -> std::expected<void, error> {
+    return set_exit(exit);
+  }
+
   [[nodiscard]] fn source_pc(const node &value) const noexcept
       -> std::uint64_t {
     return info_.start_pc + std::uint64_t{value.source_index} * 4;
@@ -290,6 +307,17 @@ public:
         info_.instruction_count >
             (std::numeric_limits<std::uint64_t>::max() - info_.start_pc) / 4)
       return std::unexpected(error{error_code::invalid_metadata, 0});
+    if (const let *exit = indirect()) {
+      if (info_.instruction_count < 2 ||
+          exit->source_index != info_.instruction_count - 2)
+        return std::unexpected(error{error_code::invalid_metadata, 0});
+      if (exit->target.index >= nodes_.size() ||
+          !produces_value(nodes_[exit->target.index].op) ||
+          nodes_[exit->target.index].type != width::bits64 ||
+          nodes_[exit->target.index].source_index > exit->source_index)
+        return std::unexpected(
+            error{error_code::invalid_operand, exit->target.index});
+    }
     if (const let *exit = jump()) {
       if (info_.instruction_count < 2 ||
           exit->source_index != info_.instruction_count - 2 ||
@@ -463,6 +491,10 @@ private:
       }
       out = std::format_to(out, " ; pc={:#x}\n", source_pc(current));
     }
+    if (const let *exit = indirect())
+      return std::format_to(
+          out, "  jump i64 %v{} ; branch PC={:#x}, delay slot included\n}}",
+          exit->target.index, *branch_pc());
     if (const let *exit = jump())
       return std::format_to(
           out, "  jump {:#x} ; branch PC={:#x}, delay slot included\n}}",
