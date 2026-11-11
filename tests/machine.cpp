@@ -449,10 +449,16 @@ fn real_rom(const char *path) -> bool {
                std::string_view{output[0].data(), written[0]},
                std::string_view{output[1].data(), written[1]});
   return check(
-      error.code == jit::dispatch_error_code::translation &&
-          error.pc == 0xffffffffbfc00684ULL &&
-          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x0100f809 &&
-          (*board)->cpu().registers[29] == 0xffffffff80003fc8ULL &&
+      error.code == jit::dispatch_error_code::invalid_pc &&
+          error.pc == ios->entry() &&
+          (*board)->cpu().pc.value == ios->entry() &&
+          (*board)->cpu().registers[4] == 2 &&
+          (*board)->cpu().registers[5] == 0 &&
+          (*board)->cpu().registers[6] == 0 &&
+          (*board)->cpu().registers[8] == ios->entry() &&
+          (*board)->cpu().registers[26] == 0xffffffffbfc003e0ULL &&
+          (*board)->cpu().registers[31] == 0xffffffffbfc0068cULL &&
+          (*board)->cpu().registers[29] == ios->entry() - 64 &&
           (*board)->cpu().cop0.registers[9] == 0 &&
           (*board)->cpu().cop0.registers[11] == 1000000 &&
           (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==

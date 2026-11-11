@@ -34,7 +34,8 @@ constexpr fn is_branch(instruction_word word) noexcept -> bool {
 
 constexpr fn has_delay_slot(instruction_word word) noexcept -> bool {
   return is_branch(word) || word.bits >> 26 == 2 || word.bits >> 26 == 3 ||
-         (word.bits >> 26 == 0 && (word.bits & 63) == 8);
+         (word.bits >> 26 == 0 &&
+          ((word.bits & 63) == 8 || (word.bits & 63) == 9));
 }
 
 constexpr fn jump_target(instruction_word word, guest_address pc) noexcept
@@ -151,7 +152,7 @@ struct error {
     const bool memory_access = load || store;
     const bool branch = is_branch(words[i]);
     const bool jump = opcode == 2 || opcode == 3;
-    const bool indirect = opcode == 0 && function == 8;
+    const bool indirect = opcode == 0 && (function == 8 || function == 9);
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift &&
         !(opcode == 0 &&
@@ -166,7 +167,8 @@ struct error {
         ((bits & 0x7ff) != 0 ||
          (rd != 9 && rd != 11 && rd != 12 && rd != 13 && rd != 15 && rd != 16)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
-    if (indirect && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0))
+    if (indirect && (rt != 0 || (function == 8 && rd != 0) ||
+                     (function == 9 && rd == rs) || ((bits >> 6) & 31) != 0))
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (lui && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
@@ -264,6 +266,16 @@ struct error {
     if (!left)
       return failed(left.error());
     if (indirect) {
+      if (function == 9 && rd != 0) {
+        const let link =
+            result.append(ir::node::constant(start.value + i * 4 + 8, source));
+        if (!link)
+          return failed(link.error());
+        if (let written = result.append(ir::node::write({rd}, *link, source));
+            !written)
+          return failed(written.error());
+        registers[rd] = *link;
+      }
       if (let exit = result.set_indirect({*left, source}); !exit)
         return failed(exit.error());
       continue;

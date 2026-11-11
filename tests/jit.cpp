@@ -797,6 +797,47 @@ fn branch_likely() -> void {
   }
 }
 
+fn register_call() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create JALR compiler");
+  for (unsigned scenario = 0; scenario < 4; scenario++) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const unsigned destination = scenario == 3 ? 5 : 31;
+    const std::array words{
+        mips::instruction_word{(8u << 21) | (destination << 11) | 9u},
+        mips::instruction_word{scenario == 1 ? 0x34080007u
+                               : scenario == 2
+                                   ? 0xdc220000u
+                                   : 0x34010000u | (destination << 21)}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block.has_value(), "translate JALR");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile JALR");
+    std::array<std::byte, mem::page_size> ram{};
+    let memory = mem::address_space::create(ram, 1);
+    require(memory.has_value(), "create JALR memory");
+    std::array<std::uint64_t, 32> state{};
+    state[8] = 0xffffffff80008000ULL;
+    state[1] = 0x9000;
+    state[31] = 0x1234;
+    const let result = native->run(state, **memory);
+    if (scenario == 2)
+      require(!result && result.error().pc == 0x1004 &&
+                  result.error().branch_pc == 0x1000 && state[31] == 0x1008,
+              "JALR writes its link before a faulting delay slot");
+    else
+      require(
+          result && *result == 0xffffffff80008000ULL &&
+              state[destination] == 0x1008 &&
+              (scenario == 1 ? state[8] == 7 : state[1] == 0x1008) &&
+              (scenario != 3 || state[31] == 0x1234),
+          "JALR captures its target and exposes the selected link in its slot");
+  }
+}
+
 fn register_jump() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -1152,6 +1193,7 @@ fn main(int argc, char **argv) -> int {
   example_program();
   branches_and_dispatch();
   branch_likely();
+  register_call();
   register_jump();
   direct_jump();
   jump_and_link();
