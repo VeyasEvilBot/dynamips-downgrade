@@ -157,11 +157,12 @@ fn composition() -> bool {
     return false;
   constexpr std::array windows{
       machine::device_window{"fixture-uart", {{0x100000}, mem::page_size}}};
-  const machine::definition model{"fixture-mips",
-                                  {"R7000", 0x2721, {0xffffffffbfc00000ULL}},
-                                  4 * mem::page_size,
-                                  {{0x1fc00000}, mem::page_size},
-                                  windows};
+  const machine::definition model{
+      "fixture-mips",
+      {"R7000", 0x2721, {0xffffffffbfc00000ULL}, {0xffffffff80004000ULL}},
+      4 * mem::page_size,
+      {{0x1fc00000}, mem::page_size},
+      windows};
   jit::uart uart{{0x100000}};
   const std::array attachments{machine::attachment{
       {0},
@@ -206,7 +207,9 @@ fn composition() -> bool {
     return false;
   (*board)->reset();
   if (!check((*board)->cpu().pc.value == model.cpu.reset.value &&
-                 (*board)->cpu().registers[1] == 0 && uart.output().empty() &&
+                 (*board)->cpu().registers[1] == 0 &&
+                 (*board)->cpu().registers[29] == model.cpu.boot_stack.value &&
+                 uart.output().empty() &&
                  memory.load<std::uint32_t>(
                      {machine::uncached_base + 0x2000}) == 0x12345678,
              "warm reset restores CPU/devices and preserves RAM"))
@@ -279,15 +282,16 @@ fn real_rom(const char *path) -> bool {
     return false;
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
   return check(
-      error.code == jit::dispatch_error_code::memory &&
-          error.pc == 0xffffffffbfc012b0ULL &&
-          error.access.reason == jit::memory::fault_reason::unmapped &&
-          error.access.address.value == 0xfffffffffffffff8ULL &&
-          (*board)->cpu().registers[29] == 0xffffffffffffffc8ULL &&
+      error.code == jit::dispatch_error_code::translation &&
+          error.pc == 0xffffffffbfc00becULL &&
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x80a50000 &&
+          (*board)->cpu().registers[29] == 0xffffffff80003fc8ULL &&
           (*board)->cpu().registers[5] == 0xffffffffbfc02710ULL &&
-          (*board)->cpu().registers[31] == 0xffffffffbfc00008ULL &&
-          (*board)->cpu().pc.value == error.pc,
-      "ROM address arithmetic reaches the missing boot stack initialization");
+          (*board)->cpu().registers[31] == 0xffffffffbfc012c0ULL &&
+          (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
+              0xffffffffbfc00008ULL &&
+          (*board)->cpu().pc.value == 0xffffffffbfc00bd0ULL,
+      "ROM stack saves the reset return address and reaches byte loading");
 }
 } // namespace
 

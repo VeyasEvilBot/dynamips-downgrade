@@ -39,6 +39,7 @@ struct cpu_definition {
   std::string_view name;
   std::uint32_t processor_id;
   jit::mips64::guest_address reset;
+  jit::mips64::guest_address boot_stack{};
 };
 
 struct device_window {
@@ -242,6 +243,7 @@ public:
   fn reset() noexcept -> void {
     state_ = {};
     state_.pc = model_.cpu.reset;
+    state_.registers[29] = model_.cpu.boot_stack.value;
     devices_.reset();
   }
   fn model() const noexcept -> const definition & { return model_; }
