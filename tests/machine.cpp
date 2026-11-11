@@ -300,7 +300,8 @@ fn byte_memory_contract() -> bool {
 
 fn rom_service_queues() -> bool {
   using dynamips::devices::rom_output;
-  dynamips::devices::rom_services device{{0x16000000}};
+  dynamips::devices::rom_services device{
+      {0x16000000}, {{0xffffffffbe000000ULL}, {0xffffffff80008000ULL}}};
   jit::devices::bus bus;
   if (!check(bus.add({{0x16000000}, mem::page_size}, device.descriptor())
                  .has_value(),
@@ -316,7 +317,9 @@ fn rom_service_queues() -> bool {
              "map ROM service registers"))
     return false;
   let &guest = **memory;
-  if (!check(guest.load<std::uint32_t>({0x8000}) == 0x1e94b3df,
+  if (!check(guest.load<std::uint32_t>({0x8000}) == 0x1e94b3df &&
+                 guest.load<std::uint32_t>({0x8044}) == 0xbe000000 &&
+                 guest.load<std::uint32_t>({0x8028}) == 0x80008000,
              "ROM identification register matches the real firmware"))
     return false;
   if (!check(!guest.store<std::uint8_t>({0x8040}, 'R') &&
@@ -388,16 +391,23 @@ fn real_rom(const char *path) -> bool {
   let rom_image = firmware::image::read(path);
   if (!check(rom_image.has_value(), "load bundled real MIPS ROM"))
     return false;
+  fixture ios_file;
+  constexpr std::array ios_words{0x3414c0deu, 0u};
+  if (!write_elf(ios_file, 0x80008000, ios_words, 0x80009000))
+    return false;
+  let ios = firmware::image::read(ios_file.path);
+  if (!check(ios.has_value(), "load handoff target ELF"))
+    return false;
   using dynamips::devices::rom_output;
-  dynamips::devices::rom_services services{{0x16000000},
-                                           {{0xffffffffbe000000ULL}}};
+  dynamips::devices::rom_services services{
+      {0x16000000}, {{0xffffffffbe000000ULL}, {ios->entry()}}};
   std::array<std::byte, 128 * 1024> nvram_bytes{};
   dynamips::devices::byte_memory nvram{{0x1e000000}, nvram_bytes};
   const std::array attachments{
       machine::attachment{dynamips::c7200::rom_services, services.descriptor()},
       machine::attachment{dynamips::c7200::nvram, nvram.descriptor()}};
   let board = machine::instance::create(dynamips::c7200::npe400, *rom_image,
-                                         nullptr, attachments);
+                                         &*ios, attachments);
   if (!check(board.has_value(), "prepare full-size C7200 NPE-400 memory map"))
     return false;
   const let first =
@@ -435,17 +445,20 @@ fn real_rom(const char *path) -> bool {
           "real C7200 ROM reaches the current CPU implementation boundary"))
     return false;
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
+  std::println(stderr, "ROM boundary {:#x}; console={:?}; log={:?}", error.pc,
+               std::string_view{output[0].data(), written[0]},
+               std::string_view{output[1].data(), written[1]});
   return check(
-      error.code == jit::dispatch_error_code::memory &&
-          error.pc == 0xffffffffbfc01358ULL &&
-          error.access.address.value == 0xffffffffb6000028ULL &&
-          (*board)->cpu().registers[29] == 0xffffffff80003fc8ULL &&
+      error.code == jit::dispatch_error_code::translation &&
+          error.pc == 0xffffffffbfc00c4cULL &&
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x28620074 &&
+          (*board)->cpu().registers[29] == 0xffffffff80003f78ULL &&
           (*board)->cpu().cop0.registers[9] == 0 &&
           (*board)->cpu().cop0.registers[11] == 1000000 &&
           (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
               0xffffffffbfc00008ULL &&
           std::string_view{output[0].data(), written[0]} ==
-              "ROMMON emulation microcode.\n\n" &&
+              "ROMMON emulation microcode.\n\nLaunching IOS image at 0x" &&
           std::string_view{output[1].data(), written[1]} ==
               "Microcode has started.\n",
       "real ROM prints both startup messages before the next CPU boundary");
