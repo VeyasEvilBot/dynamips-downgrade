@@ -204,7 +204,7 @@ fn main(int argc, char **argv) -> int {
       const std::string_view argument{argv[i]};
       if (argument == "--help") {
         std::println(
-            "Usage: c7200-boot [--rom ELF] [--ios ELF] [--budget N] "
+            "Usage: c7200-boot [--rom ELF] [--ios ELF_OR_ZIP] [--budget N] "
             "[--dump-ir]\n"
             "Prepare the C++ NPE-400 chassis and probe ROM execution.\n"
             "Default ROM: stable/mips64_microcode. Exit 2 means boot is "

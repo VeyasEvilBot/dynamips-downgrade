@@ -45,6 +45,7 @@ end
 add_requires("asio 1.36.0", { system = false })
 add_requires("asmjit 2024.05.21", { system = false })
 add_requires("zlib 1.3.2", { system = false })
+add_requires("minizip v1.3.2", { system = false })
 if has_config("enable_gen_eth") then
     if has_config("system_packages") then
         add_requires("libpcap", { system = true })
@@ -246,7 +247,7 @@ target("machine-core")
     add_cxxflags("-Wextra", "-Wpedantic", "-Wshadow", "-Wconversion", "-Wsign-conversion")
     add_includedirs("include")
     add_deps("jit-core", { public = true })
-    add_packages("libelf", { public = true })
+    add_packages("libelf", "minizip", { public = true })
     add_files("src/machine/*.cppm", "src/devices/rom_services.cppm", "src/devices/byte_memory.cppm", { public = true })
 target_end()
 

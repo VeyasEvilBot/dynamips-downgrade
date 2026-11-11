@@ -16,6 +16,7 @@
 #include <elf.h>
 #include <gelf.h>
 #include <libelf.h>
+#include <minizip/zip.h>
 
 #include <dynamips/macros.h>
 
@@ -24,6 +25,7 @@ import devices.rom_services;
 import machine.firmware;
 import machine.core;
 import machine.c7200;
+import host_memory;
 import native_fd;
 import jit.memory;
 import jit.uart;
@@ -47,6 +49,38 @@ struct fixture {
 
   ~fixture() { static_cast<void>(unlink(path)); }
 };
+
+struct zip_fixture {
+  char path[48] = "/tmp/dynamips-archive-XXXXXX.zip";
+  dynamips::host::file_descriptor descriptor{mkstemps(path, 4)};
+
+  ~zip_fixture() { static_cast<void>(unlink(path)); }
+};
+
+fn write_zip(const char *path, std::span<const char *const> names,
+               std::span<const std::byte> bytes, int method) -> bool {
+  zipFile archive = zipOpen64(path, APPEND_STATUS_CREATE);
+  if (!check(archive != nullptr, "create ZIP fixture"))
+    return false;
+  bool good = true;
+  for (const char *name : names) {
+    if (zipOpenNewFileInZip64(archive, name, nullptr, nullptr, 0, nullptr, 0,
+                              nullptr, method, Z_DEFAULT_COMPRESSION,
+                              1) != ZIP_OK) {
+      good = false;
+      break;
+    }
+    const int written = zipWriteInFileInZip(
+        archive, bytes.data(), static_cast<unsigned>(bytes.size()));
+    const int closed = zipCloseFileInZip(archive);
+    if (written != ZIP_OK || closed != ZIP_OK) {
+      good = false;
+      break;
+    }
+  }
+  const int closed = zipClose(archive, nullptr);
+  return check(good && closed == ZIP_OK, "write and close ZIP fixture");
+}
 
 struct end_elf {
   fn operator()(Elf *value) const noexcept -> void { elf_end(value); }
@@ -270,6 +304,102 @@ fn composition() -> bool {
   return true;
 }
 
+fn archive_contract() -> bool {
+  fixture elf_file;
+  zip_fixture zip_file;
+  if (!check(zip_file.descriptor.get() >= 0, "create temporary archive file"))
+    return false;
+  constexpr std::array words{0x34010007u, 0u};
+  if (!write_elf(elf_file, 0x80008000, words, 0x80009000))
+    return false;
+  let source = dynamips::host::read_file(elf_file.path);
+  if (!check(source.has_value(), "read ELF for ZIP fixtures"))
+    return false;
+  const let bytes = std::as_bytes(std::span{source->bytes.get(), source->size});
+  constexpr std::array names{"nested/IOS.BIN"};
+  for (const int method : {0, Z_DEFLATED}) {
+    if (!write_zip(zip_file.path, names, bytes, method))
+      return false;
+    let loaded = firmware::image::read(zip_file.path);
+    if (!check(loaded && loaded->entry() == 0xffffffff80008000ULL &&
+                   loaded->sections().size() == 2,
+               "load stored and deflated ZIP64 members with case-insensitive "
+               "extensions"))
+      return false;
+    let moved = std::move(*loaded);
+    if (!check(moved.sections()[0].contents[0] == std::byte{0x34},
+               "archive section views retain owned decompressed storage after "
+               "moving"))
+      return false;
+  }
+  constexpr std::array multiple{"one.bin", "two.image"};
+  if (!write_zip(zip_file.path, multiple, bytes, 0))
+    return false;
+  const let ambiguous = firmware::image::read(zip_file.path);
+  if (!check(!ambiguous && ambiguous.error().code ==
+                               firmware::error_code::multiple_archive_images,
+             "reject multiple IOS members"))
+    return false;
+  constexpr std::array missing{"readme.txt"};
+  if (!write_zip(zip_file.path, missing, bytes, 0))
+    return false;
+  const let absent = firmware::image::read(zip_file.path);
+  if (!check(!absent && absent.error().code ==
+                            firmware::error_code::missing_archive_image,
+             "reject archives without an IOS member"))
+    return false;
+  if (!write_zip(zip_file.path, names, {}, 0))
+    return false;
+  const let empty = firmware::image::read(zip_file.path);
+  if (!check(!empty && empty.error().code ==
+                           firmware::error_code::missing_archive_image,
+             "reject empty IOS members"))
+    return false;
+  if (!write_zip(zip_file.path, names, bytes, 0))
+    return false;
+  let archive = dynamips::host::read_file(zip_file.path);
+  if (!check(archive && archive->size >= 30, "read stored ZIP metadata"))
+    return false;
+  const let *header = archive->bytes.get();
+  const std::size_t data_offset = 30 + header[26] +
+                                  (std::size_t{header[27]} << 8) + header[28] +
+                                  (std::size_t{header[29]} << 8);
+  const unsigned char corrupt = 0;
+  if (!check(data_offset < archive->size &&
+                 pwrite(zip_file.descriptor.get(), &corrupt, 1,
+                        static_cast<off_t>(data_offset)) == 1,
+             "corrupt ZIP payload without updating CRC"))
+    return false;
+  const let crc = firmware::image::read(zip_file.path);
+  if (!check(!crc && crc.error().code == firmware::error_code::invalid_archive,
+             "verify member CRC before parsing ELF"))
+    return false;
+  std::size_t central = 0;
+  for (std::size_t i = 0; i + 46 <= archive->size; i++) {
+    if (header[i] == 'P' && header[i + 1] == 'K' && header[i + 2] == 1 &&
+        header[i + 3] == 2) {
+      central = i;
+      break;
+    }
+  }
+  const std::array<unsigned char, 4> oversized{1, 0, 0, 16};
+  if (!check(central != 0 && pwrite(zip_file.descriptor.get(), oversized.data(),
+                                    oversized.size(),
+                                    static_cast<off_t>(central + 24)) == 4,
+             "declare an oversized ZIP member without allocating its payload"))
+    return false;
+  const let limited = firmware::image::read(zip_file.path);
+  if (!check(!limited &&
+                 limited.error().code == firmware::error_code::too_large,
+             "reject oversized ZIP members before decompression"))
+    return false;
+  if (!check(ftruncate(zip_file.descriptor.get(), 8) == 0,
+             "truncate ZIP fixture"))
+    return false;
+  return check(!firmware::image::read(zip_file.path),
+               "reject truncated ZIP archives");
+}
+
 fn byte_memory_contract() -> bool {
   std::array<std::byte, 16> bytes{};
   dynamips::devices::byte_memory device{{0x100000}, bytes};
@@ -489,8 +619,8 @@ fn main(int argc, char **argv) -> int {
   try {
     if (argc != 2)
       return 1;
-    if (!rom_contract() || !composition() || !byte_memory_contract() ||
-        !rom_service_queues() || !real_rom(argv[1]))
+    if (!rom_contract() || !composition() || !archive_contract() ||
+        !byte_memory_contract() || !rom_service_queues() || !real_rom(argv[1]))
       return 1;
     std::println("machine: ELF loading, chassis composition, ROM protection, "
                  "reset and real C7200 boot boundary passed");

@@ -1,5 +1,7 @@
 module;
 
+#include <algorithm>
+#include <cerrno>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +14,7 @@ module;
 #include <elf.h>
 #include <gelf.h>
 #include <libelf.h>
+#include <minizip/unzip.h>
 
 #include <dynamips/macros.h>
 
@@ -22,6 +25,10 @@ import host_memory;
 export namespace dynamips::firmware {
 enum class error_code {
   host,
+  invalid_archive,
+  missing_archive_image,
+  multiple_archive_images,
+  unsupported_archive,
   invalid_elf,
   unsupported_format,
   invalid_section,
@@ -32,6 +39,15 @@ enum class error_code {
 
 constexpr fn message(error_code code) noexcept -> std::string_view {
   switch (code) {
+  case error_code::invalid_archive:
+    return "invalid or corrupt ZIP archive";
+  case error_code::missing_archive_image:
+    return "ZIP needs one nonempty .bin or .image file";
+  case error_code::multiple_archive_images:
+    return "ZIP contains multiple IOS images";
+  case error_code::unsupported_archive:
+    return "ZIP image must be unencrypted and use stored or deflate "
+           "compression";
   case error_code::host:
     return "host I/O failed";
   case error_code::invalid_elf:
@@ -78,12 +94,9 @@ public:
 
   [[nodiscard]] static fn read(const char *path) noexcept
       -> std::expected<image, error> {
-    let loaded = host::read_file_bounded(path, max_file_size);
-    if (!loaded) {
-      if (loaded.error() == std::errc::file_too_large)
-        return std::unexpected(error{error_code::too_large});
-      return std::unexpected(error{error_code::host, 0, loaded.error()});
-    }
+    let loaded = read_source(path);
+    if (!loaded)
+      return std::unexpected(loaded.error());
     if (elf_version(EV_CURRENT) == EV_NONE)
       return std::unexpected(error{error_code::invalid_elf});
 
@@ -159,6 +172,116 @@ public:
   }
 
 private:
+  static fn suffix(std::string_view name, std::string_view ending) noexcept
+      -> bool {
+    if (name.size() < ending.size())
+      return false;
+    name.remove_prefix(name.size() - ending.size());
+    for (std::size_t i = 0; i < name.size(); i++) {
+      const char folded = name[i] >= 'A' && name[i] <= 'Z'
+                              ? static_cast<char>(name[i] + ('a' - 'A'))
+                              : name[i];
+      if (folded != ending[i])
+        return false;
+    }
+    return true;
+  }
+
+  static fn read_source(const char *path) noexcept
+      -> std::expected<host::file_buffer, error> {
+    if (!path)
+      return std::unexpected(
+          error{error_code::host, 0,
+                std::make_error_code(std::errc::invalid_argument)});
+    if (!suffix(path, ".zip")) {
+      let loaded = host::read_file_bounded(path, max_file_size);
+      if (!loaded)
+        return std::unexpected(error{loaded.error() == std::errc::file_too_large
+                                         ? error_code::too_large
+                                         : error_code::host,
+                                     0, loaded.error()});
+      return std::move(*loaded);
+    }
+    errno = 0;
+    unzFile archive = unzOpen64(path);
+    if (!archive)
+      return std::unexpected(
+          errno ? error{error_code::host, 0, {errno, std::generic_category()}}
+                : error{error_code::invalid_archive});
+    let extracted = [&]() -> std::expected<host::file_buffer, error> {
+      unz_global_info64 global{};
+      if (unzGetGlobalInfo64(archive, &global) != UNZ_OK ||
+          global.number_entry > 4096)
+        return std::unexpected(error{error_code::invalid_archive});
+      bool found = false;
+      unz64_file_pos selected{};
+      std::size_t size = 0;
+      std::array<char, 65536> name{};
+      int status = unzGoToFirstFile(archive);
+      for (std::uint64_t i = 0; i < global.number_entry; i++) {
+        unz_file_info64 info{};
+        if (status != UNZ_OK ||
+            unzGetCurrentFileInfo64(archive, &info, name.data(),
+                                    static_cast<uLong>(name.size()), nullptr, 0,
+                                    nullptr, 0) != UNZ_OK ||
+            info.size_filename >= name.size())
+          return std::unexpected(error{error_code::invalid_archive});
+        const std::string_view filename{
+            name.data(), static_cast<std::size_t>(info.size_filename)};
+        if (suffix(filename, ".bin") || suffix(filename, ".image")) {
+          if (found)
+            return std::unexpected(error{error_code::multiple_archive_images});
+          if (info.uncompressed_size == 0)
+            return std::unexpected(error{error_code::missing_archive_image});
+          if (info.uncompressed_size > max_file_size)
+            return std::unexpected(error{error_code::too_large});
+          if ((info.flag & 1) ||
+              (info.compression_method != 0 && info.compression_method != 8))
+            return std::unexpected(error{error_code::unsupported_archive});
+          if (unzGetFilePos64(archive, &selected) != UNZ_OK)
+            return std::unexpected(error{error_code::invalid_archive});
+          size = static_cast<std::size_t>(info.uncompressed_size);
+          found = true;
+        }
+        status = unzGoToNextFile(archive);
+      }
+      if (!found)
+        return std::unexpected(error{error_code::missing_archive_image});
+      if (status != UNZ_END_OF_LIST_OF_FILE ||
+          unzGoToFilePos64(archive, &selected) != UNZ_OK ||
+          unzOpenCurrentFile(archive) != UNZ_OK)
+        return std::unexpected(error{error_code::invalid_archive});
+      let contents = [&]() -> std::expected<host::file_buffer, error> {
+        let allocated =
+            host::allocate_aligned(alignof(std::max_align_t), size);
+        if (!allocated)
+          return std::unexpected(error{error_code::host, 0, allocated.error()});
+        std::size_t offset = 0;
+        while (offset < size) {
+          const let chunk = static_cast<unsigned>(
+              std::min<std::size_t>(size - offset, 64 * 1024));
+          const int count =
+              unzReadCurrentFile(archive, allocated->get() + offset, chunk);
+          if (count <= 0)
+            return std::unexpected(error{error_code::invalid_archive});
+          offset += static_cast<std::size_t>(count);
+        }
+        unsigned char extra;
+        if (unzReadCurrentFile(archive, &extra, 1) != 0)
+          return std::unexpected(error{error_code::invalid_archive});
+        return host::file_buffer{std::move(*allocated), size};
+      }();
+      const int closed = unzCloseCurrentFile(archive);
+      if (closed != UNZ_OK && contents)
+        return std::unexpected(error{error_code::invalid_archive});
+      return contents;
+    }();
+    const int closed = unzClose(archive);
+    if (closed != UNZ_OK && extracted)
+      return std::unexpected(error{error_code::invalid_archive});
+    return extracted;
+  }
+
   host::file_buffer file_{};
   std::array<section, max_sections> sections_{};
   std::size_t count_ = 0;
