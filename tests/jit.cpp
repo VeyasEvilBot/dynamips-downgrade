@@ -437,6 +437,40 @@ fn mmio_console() -> void {
               console.output().size() == jit::uart::capacity,
           "full console faults without overwriting the buffer");
 }
+fn cop0_writes() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create CP0 compiler");
+  for (const unsigned slot : {9u, 11u, 12u, 13u, 15u, 16u}) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{0x40810000u | (slot << 11)}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block.has_value(), "translate MTC0");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile MTC0");
+    std::array<std::byte, mem::page_size> ram{};
+    let memory = mem::address_space::create(ram, 1);
+    require(memory.has_value(), "create CP0 execution memory");
+    std::array<std::uint64_t, 32> state{};
+    state[1] = 0xffffffff87654321ULL;
+    mips::cop0_state cop0;
+    cop0.registers[slot] = 0x1234;
+    cop0.registers[13] = 0x8001;
+    const let absent = native->run(state, **memory);
+    require(!absent && absent.error().code == amd64::error_code::cop0_required,
+            "CP0 instructions reject missing state");
+    require(native->run(state, **memory, &cop0).has_value() &&
+                cop0.registers[slot] ==
+                    (slot == 15 || slot == 16 ? 0x1234u : 0x87654321u),
+            "MTC0 stores low 32 bits and preserves read-only registers");
+    if (slot == 11)
+      require(cop0.registers[13] == 1,
+              "Compare write clears pending timer interrupt");
+  }
+}
+
 fn byte_stores() -> void {
   namespace mem = jit::memory;
   std::array<std::byte, mem::page_size> ram{};
@@ -1037,6 +1071,7 @@ fn main(int argc, char **argv) -> int {
   immediate_operands();
   observed_stores();
   memory_operations();
+  cop0_writes();
   byte_stores();
   signed_byte_loads();
   mmio_console();

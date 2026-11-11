@@ -244,6 +244,9 @@ public:
     state_ = {};
     state_.pc = model_.cpu.reset;
     state_.registers[29] = model_.cpu.boot_stack.value;
+    state_.cop0.registers[12] = 0x00400000;
+    state_.cop0.registers[15] = model_.cpu.processor_id;
+    state_.cop0.registers[16] = 0x00c08ff0;
     devices_.reset();
   }
   fn model() const noexcept -> const definition & { return model_; }

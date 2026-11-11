@@ -133,7 +133,8 @@ public:
         result.reason = stop_reason::budget_exhausted;
         return result;
       }
-      const let executed = entry.code->run(state.registers, memory_);
+      const let executed =
+          entry.code->run(state.registers, memory_, &state.cop0);
       if (!executed) {
         state.pc.value = executed.error().pc;
         return std::unexpected(dispatch_error{dispatch_error_code::memory,

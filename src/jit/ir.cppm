@@ -43,6 +43,7 @@ enum class opcode : std::uint8_t {
   bit_or,
   bit_xor,
   write_state,
+  write_cop0,
   load8_signed,
   load32_signed,
   load64,
@@ -52,8 +53,8 @@ enum class opcode : std::uint8_t {
 };
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
-  return op != opcode::write_state && op != opcode::store8 &&
-         op != opcode::store32 && op != opcode::store64;
+  return op != opcode::write_cop0 && op != opcode::write_state &&
+         op != opcode::store8 && op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t { add_wrap, bit_and, bit_or, bit_xor };
@@ -110,6 +111,15 @@ struct node {
             source,
             slot,
             opcode::write_state,
+            width::bits64};
+  }
+
+  static constexpr fn write_cop0(state_slot slot, value_id value,
+                                  std::uint32_t source) noexcept -> node {
+    return {{.inputs = {value, {}}},
+            source,
+            slot,
+            opcode::write_cop0,
             width::bits64};
   }
 
@@ -396,6 +406,16 @@ private:
           current.data.immediate > std::numeric_limits<std::uint32_t>::max())
         return fail(error_code::invalid_operand);
       break;
+    case opcode::write_cop0:
+      if (current.slot.index != 9 && current.slot.index != 11 &&
+          current.slot.index != 12 && current.slot.index != 13 &&
+          current.slot.index != 15 && current.slot.index != 16)
+        return fail(error_code::invalid_slot);
+      if (current.type != width::bits64)
+        return fail(error_code::invalid_type);
+      if (!operand_valid(current.data.inputs.left))
+        return fail(error_code::invalid_operand);
+      break;
     case opcode::read_state:
     case opcode::write_state:
       if (current.slot.index >= info_.state_slots)
@@ -462,6 +482,11 @@ private:
       case opcode::read_state:
         out = std::format_to(out, "  %v{} = state.read i64 %state, {}", i,
                              current.slot.index);
+        break;
+      case opcode::write_cop0:
+        out =
+            std::format_to(out, "  cop0.write.i32 %v{}, {}",
+                           current.data.inputs.left.index, current.slot.index);
         break;
       case opcode::write_state:
         out =

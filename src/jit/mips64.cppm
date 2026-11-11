@@ -46,9 +46,22 @@ constexpr fn jump_target(instruction_word word, guest_address pc) noexcept
   };
 }
 
+struct cop0_state {
+  std::array<std::uint32_t, 32> registers{};
+
+  fn write(std::uint16_t slot, std::uint32_t value) noexcept -> void {
+    if (slot == 15 || slot == 16)
+      return;
+    registers[slot] = value;
+    if (slot == 11)
+      registers[13] &= ~(1u << 15);
+  }
+};
+
 struct state {
   std::array<std::uint64_t, 32> registers{};
   guest_address pc{};
+  cop0_state cop0{};
 
   fn print() const -> void {
     std::println("; native execution, PC={:#x}", pc.value);
@@ -123,6 +136,7 @@ struct error {
     const let rt = static_cast<std::uint16_t>((bits >> 16) & 31);
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
     const let function = bits & 63;
+    const bool mtc0 = opcode == 0x10 && rs == 4;
     const bool lui = opcode == 0x0f;
     const bool addiu = opcode == 0x09;
     const bool immediate = opcode == 0x0c || opcode == 0x0d || lui || addiu;
@@ -133,17 +147,21 @@ struct error {
     const bool jump = opcode == 2 || opcode == 3;
     const bool indirect = opcode == 0 && function == 8;
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !(opcode == 0 && (function == 0x26 || function == 0x2d)))
+        !mtc0 && !(opcode == 0 && (function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        ((bits >> 6) & 31) != 0)
+        !mtc0 && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
+    if (mtc0 && ((bits & 0x7ff) != 0 || (rd != 9 && rd != 11 && rd != 12 &&
+                                         rd != 13 && rd != 15 && rd != 16)))
+      return std::unexpected(error{error_code::unsupported_instruction, i});
     if (indirect && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0))
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (lui && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = immediate || memory_access ? rt : rd;
-    if (destination == 0 && !memory_access && !branch && !jump && !indirect)
+    if (destination == 0 && !memory_access && !branch && !jump && !indirect &&
+        !mtc0)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -194,6 +212,16 @@ struct error {
       }
       return registers[index];
     };
+    if (mtc0) {
+      const let value = read(rt);
+      if (!value)
+        return failed(value.error());
+      if (let written =
+              result.append(ir::node::write_cop0({rd}, *value, source));
+          !written)
+        return failed(written.error());
+      continue;
+    }
     const let left = read(rs);
     if (!left)
       return failed(left.error());
