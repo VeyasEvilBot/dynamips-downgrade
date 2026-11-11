@@ -236,6 +236,7 @@ public:
         case ir::opcode::constant:
         case ir::opcode::sign_extend32:
         case ir::opcode::add_wrap:
+        case ir::opcode::bit_and:
         case ir::opcode::bit_or:
         case ir::opcode::bit_xor:
           break;
@@ -418,6 +419,7 @@ public:
                               asmjit::x86::Mem{state, node.slot.index * 8, 8});
           break;
         case ir::opcode::add_wrap:
+        case ir::opcode::bit_and:
         case ir::opcode::bit_or:
         case ir::opcode::bit_xor: {
           let left = node.data.inputs.left;
@@ -433,6 +435,8 @@ public:
           const let emit = [&](const auto &right_value) {
             if (node.op == ir::opcode::add_wrap)
               return output.add(result, right_value);
+            if (node.op == ir::opcode::bit_and)
+              return output.and_(result, right_value);
             if (node.op == ir::opcode::bit_or)
               return output.or_(result, right_value);
             return output.xor_(result, right_value);

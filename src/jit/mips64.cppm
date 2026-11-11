@@ -124,7 +124,7 @@ struct error {
     const let function = bits & 63;
     const bool lui = opcode == 0x0f;
     const bool addiu = opcode == 0x09;
-    const bool immediate = opcode == 0x0d || lui || addiu;
+    const bool immediate = opcode == 0x0c || opcode == 0x0d || lui || addiu;
     const bool load = opcode == 0x20 || opcode == 0x23 || opcode == 0x37;
     const bool store = opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
@@ -256,8 +256,9 @@ struct error {
                   : read(rt);
     if (!right)
       return failed(right.error());
-    const let operation = addiu       ? ir::binary_kind::add_wrap
-                          : immediate ? ir::binary_kind::bit_or
+    const let operation = opcode == 0x0c ? ir::binary_kind::bit_and
+                          : addiu        ? ir::binary_kind::add_wrap
+                          : immediate    ? ir::binary_kind::bit_or
                           : function == 0x26 ? ir::binary_kind::bit_xor
                                              : ir::binary_kind::add_wrap;
     let value =

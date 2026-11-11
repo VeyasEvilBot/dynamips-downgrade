@@ -39,6 +39,7 @@ enum class opcode : std::uint8_t {
   read_state,
   sign_extend32,
   add_wrap,
+  bit_and,
   bit_or,
   bit_xor,
   write_state,
@@ -54,7 +55,7 @@ constexpr fn produces_value(opcode op) noexcept -> bool {
          op != opcode::store64;
 }
 
-enum class binary_kind : std::uint8_t { add_wrap, bit_or, bit_xor };
+enum class binary_kind : std::uint8_t { add_wrap, bit_and, bit_or, bit_xor };
 
 struct operands {
   value_id left;
@@ -95,9 +96,10 @@ struct node {
   static constexpr fn binary(binary_kind kind, value_id left, value_id right,
                               std::uint32_t source,
                               width type = width::bits64) noexcept -> node {
-    const let op = kind == binary_kind::add_wrap ? opcode::add_wrap
-                   : kind == binary_kind::bit_or ? opcode::bit_or
-                                                 : opcode::bit_xor;
+    const let op = kind == binary_kind::add_wrap  ? opcode::add_wrap
+                   : kind == binary_kind::bit_and ? opcode::bit_and
+                   : kind == binary_kind::bit_or  ? opcode::bit_or
+                                                  : opcode::bit_xor;
     return {{.inputs = {left, right}}, source, {}, op, type};
   }
 
@@ -373,6 +375,7 @@ private:
         return fail(error_code::invalid_operand);
       break;
     case opcode::add_wrap:
+    case opcode::bit_and:
     case opcode::bit_or:
     case opcode::bit_xor:
       if (!operand_valid(current.data.inputs.left) ||
@@ -443,11 +446,13 @@ private:
                              current.data.inputs.left.index);
         break;
       case opcode::add_wrap:
+      case opcode::bit_and:
       case opcode::bit_or:
       case opcode::bit_xor: {
-        const let name = current.op == opcode::add_wrap ? "add"
-                         : current.op == opcode::bit_or ? "or"
-                                                        : "xor";
+        const let name = current.op == opcode::add_wrap  ? "add"
+                         : current.op == opcode::bit_and ? "and"
+                         : current.op == opcode::bit_or  ? "or"
+                                                         : "xor";
         out = std::format_to(out, "  %v{} = {} i{} %v{}, %v{}", i, name, bits,
                              current.data.inputs.left.index,
                              current.data.inputs.right.index);
@@ -493,7 +498,7 @@ private:
       continue;
     }
     if (current.op != opcode::add_wrap && current.op != opcode::bit_or &&
-        current.op != opcode::bit_xor)
+        current.op != opcode::bit_xor && current.op != opcode::bit_and)
       continue;
     const let &left = value.nodes()[current.data.inputs.left.index];
     const let &right = value.nodes()[current.data.inputs.right.index];
@@ -503,6 +508,9 @@ private:
     switch (current.op) {
     case opcode::add_wrap:
       bits = left.data.immediate + right.data.immediate;
+      break;
+    case opcode::bit_and:
+      bits = left.data.immediate & right.data.immediate;
       break;
     case opcode::bit_or:
       bits = left.data.immediate | right.data.immediate;

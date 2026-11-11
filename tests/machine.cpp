@@ -283,15 +283,15 @@ fn real_rom(const char *path) -> bool {
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
   return check(
       error.code == jit::dispatch_error_code::translation &&
-          error.pc == 0xffffffffbfc00c38ULL &&
-          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x30a500ff &&
+          error.pc == 0xffffffffbfc01224ULL &&
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x03e00008 &&
           (*board)->cpu().registers[29] == 0xffffffff80003f78ULL &&
           (*board)->cpu().registers[5] == 'R' &&
-          (*board)->cpu().registers[31] == 0xffffffffbfc012c0ULL &&
+          (*board)->cpu().registers[31] == 0xffffffffbfc00c20ULL &&
           (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
               0xffffffffbfc00008ULL &&
-          (*board)->cpu().pc.value == 0xffffffffbfc00c30ULL,
-      "ROM reaches the ANDI delay slot of its likely branch");
+          (*board)->cpu().pc.value == 0xffffffffbfc01220ULL,
+      "ROM calls its character output routine and reaches JR");
 }
 } // namespace
 
