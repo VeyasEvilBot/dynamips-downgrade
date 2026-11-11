@@ -172,7 +172,7 @@ private:
       -> std::expected<void, dispatch_error> {
     let count = std::min<std::size_t>(64, image_.size() - index);
     for (std::size_t i = 0; i < count; i++) {
-      if (!mips64::is_branch(image_[index + i]))
+      if (!mips64::has_delay_slot(image_[index + i]))
         continue;
       count = std::min(i + 2, image_.size() - index);
       break;
@@ -182,7 +182,7 @@ private:
       const let fetched = memory_.fetch<std::uint32_t>({pc + i * 4});
       if (!fetched) {
         const bool delay_slot =
-            i != 0 && mips64::is_branch(image_[index + i - 1]);
+            i != 0 && mips64::has_delay_slot(image_[index + i - 1]);
         const let prefix = delay_slot ? i - 1 : i;
         if (prefix != 0) {
           count = prefix;

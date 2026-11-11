@@ -90,11 +90,10 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
             std::get_if<jit::dispatch_error>(&result.error().cause)) {
       const let word = (*board)->memory().fetch<std::uint32_t>({guest->pc});
       if (guest->code == jit::dispatch_error_code::translation && word) {
-        const let name = (*word >> 26) == 3 ? "JAL" : "unsupported opcode";
         std::println(
             stderr,
             "boot blocked at PC {:#x}: {} ({:#010x}), translation error {}",
-            guest->pc, name, *word,
+            guest->pc, "unsupported opcode", *word,
             static_cast<unsigned>(guest->translation.code));
       } else if (guest->code == jit::dispatch_error_code::memory) {
         std::println(stderr,

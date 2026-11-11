@@ -443,6 +443,9 @@ public:
         if (const let status = output.bind(skip))
           return failure(status, block.nodes().size());
       }
+      if (const let *jump = block.jump())
+        if (const let status = output.mov(next_pc, asmjit::Imm{jump->target}))
+          return failure(status, block.nodes().size());
       if (const let status = output.ret(next_pc))
         return failure(status, block.nodes().size());
       if (const let status = output.endFunc())
@@ -452,12 +455,8 @@ public:
       compiled_block::entry_point entry = nullptr;
       if (const let status = runtime_->add(&entry, &code))
         return failure(status, block.nodes().size());
-      return compiled_block{
-          runtime_, entry, block.info().state_slots, uses_memory,
-          block.branch()
-              ? std::optional{block.info().start_pc +
-                              std::uint64_t{block.branch()->source_index} * 4}
-              : std::nullopt};
+      return compiled_block{runtime_, entry, block.info().state_slots,
+                            uses_memory, block.branch_pc()};
     } catch (const std::bad_alloc &) {
       return std::unexpected(error{error_code::out_of_memory});
     }

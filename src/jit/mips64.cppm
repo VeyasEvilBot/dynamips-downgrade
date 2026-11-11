@@ -32,6 +32,19 @@ constexpr fn is_branch(instruction_word word) noexcept -> bool {
   return op == 4 || op == 5;
 }
 
+constexpr fn has_delay_slot(instruction_word word) noexcept -> bool {
+  return is_branch(word) || word.bits >> 26 == 3;
+}
+
+constexpr fn jal_target(instruction_word word, guest_address pc) noexcept
+    -> guest_address {
+  const std::uint64_t low = std::uint64_t{word.bits & 0x03ff'ffffu} << 2;
+
+  return {
+      ((pc.value + 4) & ~std::uint64_t{0x0fff'ffff}) | low,
+  };
+}
+
 struct state {
   std::array<std::uint64_t, 32> registers{};
   guest_address pc{};
@@ -66,11 +79,11 @@ struct error {
   if (start.value % 4 != 0)
     return std::unexpected(error{error_code::unaligned_pc, 0});
   for (std::size_t i = 0; i < words.size(); i++) {
-    if (!is_branch(words[i]))
+    if (!has_delay_slot(words[i]))
       continue;
     if (i + 1 == words.size())
       return std::unexpected(error{error_code::missing_delay_slot, i});
-    if (is_branch(words[i + 1]))
+    if (has_delay_slot(words[i + 1]))
       return std::unexpected(error{error_code::branch_in_delay_slot, i + 1});
     words = words.first(i + 2);
     break;
@@ -114,13 +127,15 @@ struct error {
     const bool store = opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
     const bool branch = is_branch(words[i]);
-    if (!immediate && !memory_access && !branch &&
+    const bool jump = opcode == 3;
+    if (!immediate && !memory_access && !branch && !jump &&
         !(opcode == 0 && (function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
-    if (!immediate && !memory_access && !branch && ((bits >> 6) & 31) != 0)
+    if (!immediate && !memory_access && !branch && !jump &&
+        ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = immediate || memory_access ? rt : rd;
-    if (destination == 0 && !memory_access && !branch)
+    if (destination == 0 && !memory_access && !branch && !jump)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -129,6 +144,20 @@ struct error {
                                        : error_code::invalid_ir,
                                    i});
     };
+    if (jump) {
+      const guest_address pc{start.value + i * 4};
+      const let link = result.append(ir::node::constant(pc.value + 8, source));
+      if (!link)
+        return failed(link.error());
+      if (let written = result.append(ir::node::write({31}, *link, source));
+          !written)
+        return failed(written.error());
+      registers[31] = *link;
+      if (let exit = result.set_jump({jal_target(words[i], pc).value, source});
+          !exit)
+        return failed(exit.error());
+      continue;
+    }
     const let read =
         [&](std::uint16_t index) -> std::expected<ir::value_id, ir::error> {
       if (registers[index].index == std::numeric_limits<std::uint32_t>::max()) {

@@ -278,11 +278,14 @@ fn real_rom(const char *path) -> bool {
           "real C7200 ROM reaches the current CPU implementation boundary"))
     return false;
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
-  return check(error.code == jit::dispatch_error_code::translation &&
-                   error.pc == 0xffffffffbfc00000ULL &&
-                   (*board)->cpu().pc.value == error.pc,
-               "report the actual first unimplemented ROM instruction without "
-               "claiming IOS boot");
+  return check(
+      error.code == jit::dispatch_error_code::translation &&
+          error.pc == 0xffffffffbfc012a0ULL &&
+          (*board)->cpu().registers[31] == 0xffffffffbfc00008ULL &&
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x3c05bfc0 &&
+          (*board)->cpu().pc.value == error.pc,
+      "execute ROM JAL and report the next unimplemented instruction without "
+      "claiming IOS boot");
 }
 } // namespace
 

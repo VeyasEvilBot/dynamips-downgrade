@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <algorithm>
 #include <expected>
+#include <format>
+#include <string>
 #include <memory_resource>
 #include <optional>
 #include <print>
@@ -544,19 +546,108 @@ fn branches_and_dispatch() -> void {
           "reject branch in delay slot");
 }
 
+fn jump_and_link() -> void {
+  namespace mem = jit::memory;
+  constexpr std::uint64_t pc = 0xffffffffbfc00000ULL;
+  require(mips::jal_target({0x0ff004a8}, {pc}).value == 0xffffffffbfc012a0ULL &&
+              mips::jal_target({0x0c000000}, {0xffffffff8ffffffcULL}).value ==
+                  0xffffffff90000000ULL,
+          "JAL target preserves upper PC+4 bits");
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create JAL compiler");
+  for (unsigned scenario = 0; scenario < 3; scenario++) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{0x0ff004a8},
+                           mips::instruction_word{scenario == 0 ? 0x37e10000u
+                                                  : scenario == 1
+                                                      ? 0x341f0007u
+                                                      : 0xdc620000u},
+                           mips::instruction_word{0xffffffff}};
+    let block = mips::translate(words, {pc}, arena);
+    require(block && block->jump() && block->info().instruction_count == 2,
+            "JAL ends block after delay slot");
+    require(std::format("{}", *block).find("jump 0xffffffffbfc012a0") !=
+                std::string::npos,
+            "print unconditional IR exit");
+    require(ir::optimize(*block, ir::fold_constants).has_value(),
+            "optimize JAL IR");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile JAL");
+    std::array<std::byte, mem::page_size> ram{};
+    let memory = mem::address_space::create(ram, 1);
+    require(memory.has_value(), "create JAL memory");
+    std::array<std::uint64_t, 32> state{};
+    state[3] = 0x9000;
+    const let result = native->run(state, **memory);
+    if (scenario == 2)
+      require(!result && result.error().pc == pc + 4 &&
+                  result.error().branch_pc == pc && state[31] == pc + 8,
+              "faulting JAL slot preserves link and branch metadata");
+    else
+      require(result && *result == 0xffffffffbfc012a0ULL &&
+                  state[31] == (scenario == 0 ? pc + 8 : 7) &&
+                  (scenario != 0 || state[1] == pc + 8),
+              "delay slot can read or overwrite JAL link");
+    const let missing = mips::translate(std::span{words}.first(1), {pc}, arena);
+    require(!missing &&
+                missing.error().code == mips::error_code::missing_delay_slot,
+            "JAL requires delay slot");
+    for (const std::uint32_t nested : {0x0c000000u, 0x10000000u}) {
+      const std::array invalid{words[0], mips::instruction_word{nested}};
+      const let rejected = mips::translate(invalid, {pc}, arena);
+      require(!rejected && rejected.error().code ==
+                               mips::error_code::branch_in_delay_slot,
+              "reject control transfer in JAL delay slot");
+    }
+  }
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  constexpr let rw = mem::permission::read | mem::permission::write;
+  constexpr let rx = mem::permission::read | mem::permission::execute;
+  require(memory && (*memory)->map_ram({0x1000}, {0}, rw).has_value(),
+          "map JAL dispatch image");
+  constexpr std::array words{
+      mips::instruction_word{0x0c000403}, mips::instruction_word{0x37e10000},
+      mips::instruction_word{0x34020063}, mips::instruction_word{0x34030007}};
+  for (std::size_t i = 0; i < words.size(); i++)
+    require((*memory)
+                ->store<std::uint32_t>({0x1000 + i * 4}, words[i].bits)
+                .has_value(),
+            "load JAL dispatch image");
+  require((*memory)->protect({0x1000}, rx).has_value(), "protect JAL image");
+  let dispatch = jit::dispatcher::create(words, {0x1000}, **memory);
+  require(dispatch.has_value(), "create JAL dispatcher");
+  mips::state state{};
+  state.pc = {0x1000};
+  const let short_slice = (*dispatch)->run_slice(state, 1);
+  require(short_slice && short_slice->instructions == 0 &&
+              state.registers[31] == 0,
+          "budget cannot split JAL and slot");
+  const let result = (*dispatch)->run_slice(state, 10);
+  require(result && result->instructions == 3 &&
+              state.registers[31] == 0x1008 && state.registers[1] == 0x1008 &&
+              state.registers[2] == 0 && state.registers[3] == 7,
+          "dispatcher follows JAL target after slot");
+}
+
 fn instruction_fetch_faults() -> void {
   namespace mem = jit::memory;
   constexpr let rw = mem::permission::read | mem::permission::write;
   constexpr let rx = mem::permission::read | mem::permission::execute;
-  for (unsigned scenario = 0; scenario < 4; scenario++) {
-    const bool branch = (scenario & 1) != 0;
-    const bool denied = (scenario & 2) != 0;
+  for (unsigned scenario = 0; scenario < 6; scenario++) {
+    const bool branch = scenario % 3 != 0;
+    const bool denied = scenario >= 3;
     std::array<std::byte, 2 * mem::page_size> ram{};
     let memory = mem::address_space::create(ram, 2);
     require(memory && (*memory)->map_ram({0x1000}, {0}, rw).has_value(),
             "map boundary fetch code");
     const std::array words{mips::instruction_word{0x34010007},
-                           mips::instruction_word{branch ? 0x10000000u : 0u},
+                           mips::instruction_word{scenario % 3 == 2
+                                                      ? 0x0c000000u
+                                                  : branch ? 0x10000000u
+                                                           : 0u},
                            mips::instruction_word{0}};
     for (std::size_t i = 0; i < 2; i++)
       require((*memory)
@@ -734,6 +825,7 @@ fn main(int argc, char **argv) -> int {
   mmio_console();
   example_program();
   branches_and_dispatch();
+  jump_and_link();
   instruction_fetch_faults();
   std::println(
       "jit: native lowering, differential and ownership checks passed");

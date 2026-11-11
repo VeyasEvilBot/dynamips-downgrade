@@ -2,6 +2,7 @@ module;
 
 #include <concepts>
 #include <cstddef>
+#include <variant>
 #include <cstdint>
 #include <expected>
 #include <format>
@@ -153,6 +154,13 @@ struct branch_exit {
   branch_kind kind;
 };
 
+struct jump_exit {
+  std::uint64_t target;
+  std::uint32_t source_index;
+};
+
+using block_exit = std::variant<std::monostate, branch_exit, jump_exit>;
+
 class block {
 public:
   block(const block &) = delete;
@@ -162,7 +170,7 @@ public:
     if (this != &other) {
       // reconstruction transfers PMR storage without allocating
       info_ = other.info_;
-      branch_ = other.branch_;
+      exit_ = other.exit_;
       std::destroy_at(&nodes_);
       std::construct_at(&nodes_, std::move(other.nodes_));
     }
@@ -208,19 +216,41 @@ public:
 
   [[nodiscard]] fn info() const noexcept -> block_info { return info_; }
 
-  fn branch() const noexcept -> const std::optional<branch_exit> & {
-    return branch_;
+  fn branch() const noexcept -> const branch_exit * {
+    return std::get_if<branch_exit>(&exit_);
+  }
+
+  fn jump() const noexcept -> const jump_exit * {
+    return std::get_if<jump_exit>(&exit_);
+  }
+
+  fn branch_pc() const noexcept -> std::optional<std::uint64_t> {
+    if (const let *value = branch())
+      return info_.start_pc + std::uint64_t{value->source_index} * 4;
+    if (const let *value = jump())
+      return info_.start_pc + std::uint64_t{value->source_index} * 4;
+    return std::nullopt;
+  }
+
+  [[nodiscard]] fn set_exit(block_exit exit) noexcept
+      -> std::expected<void, error> {
+    const let previous = exit_;
+    exit_ = exit;
+    if (let result = verify(); !result) {
+      exit_ = previous;
+      return result;
+    }
+    return {};
   }
 
   [[nodiscard]] fn set_branch(branch_exit exit) noexcept
       -> std::expected<void, error> {
-    const let previous = branch_;
-    branch_ = exit;
-    if (let result = verify(); !result) {
-      branch_ = previous;
-      return result;
-    }
-    return {};
+    return set_exit(exit);
+  }
+
+  [[nodiscard]] fn set_jump(jump_exit exit) noexcept
+      -> std::expected<void, error> {
+    return set_exit(exit);
   }
 
   [[nodiscard]] fn source_pc(const node &value) const noexcept
@@ -237,8 +267,14 @@ public:
         info_.instruction_count >
             (std::numeric_limits<std::uint64_t>::max() - info_.start_pc) / 4)
       return std::unexpected(error{error_code::invalid_metadata, 0});
-    if (branch_) {
-      const let &exit = *branch_;
+    if (const let *exit = jump()) {
+      if (info_.instruction_count < 2 ||
+          exit->source_index != info_.instruction_count - 2 ||
+          exit->target % 4 != 0)
+        return std::unexpected(error{error_code::invalid_metadata, 0});
+    }
+    if (branch()) {
+      const let &exit = *branch();
       if (info_.instruction_count < 2 ||
           exit.source_index != info_.instruction_count - 2 ||
           exit.target % 4 != 0 ||
@@ -268,7 +304,7 @@ private:
       : info_(info), nodes_(&memory) {}
 
   block_info info_;
-  std::optional<branch_exit> branch_;
+  block_exit exit_;
   std::pmr::vector<node> nodes_;
 
   fn verify_node(const node &current, std::size_t index) const noexcept
@@ -379,14 +415,19 @@ private:
       }
       out = std::format_to(out, " ; pc={:#x}\n", source_pc(current));
     }
-    if (branch_)
+    if (const let *exit = jump())
+      return std::format_to(
+          out, "  jump {:#x} ; branch PC={:#x}, delay slot included\n}}",
+          exit->target, *branch_pc());
+    if (branch())
       return std::format_to(
           out,
           "  br.{} %v{}, %v{}, {:#x}, {:#x} ; branch PC={:#x}, delay slot "
           "included\n}}",
-          branch_->kind == branch_kind::equal ? "eq" : "ne",
-          branch_->left.index, branch_->right.index, branch_->target, next_pc(),
-          info_.start_pc + std::uint64_t{branch_->source_index} * 4);
+          branch()->kind == branch_kind::equal ? "eq" : "ne",
+          branch()->left.index, branch()->right.index, branch()->target,
+          next_pc(),
+          info_.start_pc + std::uint64_t{branch()->source_index} * 4);
     return std::format_to(out, "  ret i64 {}\n}}", next_pc());
   }
 };
