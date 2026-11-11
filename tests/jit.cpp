@@ -60,7 +60,7 @@ fn differential() -> void {
       const let rs = static_cast<std::uint32_t>(next(seed) & 31);
       const let rt = static_cast<std::uint32_t>(next(seed) & 31);
       const let rd = static_cast<std::uint32_t>(next(seed) & 31);
-      switch (next(seed) % 7) {
+      switch (next(seed) % 8) {
       case 0: {
         const let immediate = static_cast<std::uint32_t>(next(seed) & 0xffff);
         word.bits = (0x0du << 26) | (rs << 21) | (rt << 16) | immediate;
@@ -78,6 +78,14 @@ fn differential() -> void {
         if (rd != 0)
           expected[rd] = read(rs) + read(rt);
         break;
+      case 7: {
+        const let immediate = static_cast<std::uint32_t>(next(seed) & 0xffff);
+        word.bits = (0x0bu << 26) | (rs << 21) | (rt << 16) | immediate;
+        if (rt != 0)
+          expected[rt] = read(rs) < static_cast<std::uint64_t>(std::int64_t{
+                                        static_cast<std::int16_t>(immediate)});
+        break;
+      }
       case 6: {
         const let immediate = static_cast<std::uint32_t>(next(seed) & 0xffff);
         word.bits = (0x0au << 26) | (rs << 21) | (rt << 16) | immediate;
@@ -195,9 +203,9 @@ fn immediate_operands() -> void {
       0,           0x7fffffff,         0x80000000,         0xffffffff,
       0x100000000, 0xffffffff7fffffff, 0xffffffff80000000, UINT64_MAX};
   constexpr std::array operations{
-      ir::binary_kind::signed_less, ir::binary_kind::bit_and,
-      ir::binary_kind::add_wrap, ir::binary_kind::bit_or,
-      ir::binary_kind::bit_xor};
+      ir::binary_kind::unsigned_less, ir::binary_kind::signed_less,
+      ir::binary_kind::bit_and,       ir::binary_kind::add_wrap,
+      ir::binary_kind::bit_or,        ir::binary_kind::bit_xor};
   for (const let bits : constants) {
     for (const let operation : operations) {
       for (unsigned side = 0; side < 2; side++) {
@@ -223,7 +231,10 @@ fn immediate_operands() -> void {
         for (const let value : {std::uint64_t{0x123456789abcdef}, UINT64_MAX}) {
           std::array<std::uint64_t, 4> state{0, value, 0, 0};
           const let expected =
-              operation == ir::binary_kind::signed_less
+              operation == ir::binary_kind::unsigned_less
+                  ? static_cast<std::uint64_t>((side == 0 ? value : bits) <
+                                               (side == 0 ? bits : value))
+              : operation == ir::binary_kind::signed_less
                   ? static_cast<std::uint64_t>(
                         std::bit_cast<std::int64_t>(side == 0 ? value : bits) <
                         std::bit_cast<std::int64_t>(side == 0 ? bits : value))

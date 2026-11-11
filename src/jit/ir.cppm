@@ -40,6 +40,7 @@ enum class opcode : std::uint8_t {
   read_state,
   shift_right32,
   sign_extend32,
+  unsigned_less,
   signed_less,
   add_wrap,
   bit_and,
@@ -62,6 +63,7 @@ constexpr fn produces_value(opcode op) noexcept -> bool {
 }
 
 enum class binary_kind : std::uint8_t {
+  unsigned_less,
   signed_less,
   add_wrap,
   bit_and,
@@ -123,11 +125,12 @@ struct node {
   static constexpr fn binary(binary_kind kind, value_id left, value_id right,
                               std::uint32_t source,
                               width type = width::bits64) noexcept -> node {
-    const let op = kind == binary_kind::signed_less ? opcode::signed_less
-                   : kind == binary_kind::add_wrap  ? opcode::add_wrap
-                   : kind == binary_kind::bit_and   ? opcode::bit_and
-                   : kind == binary_kind::bit_or    ? opcode::bit_or
-                                                    : opcode::bit_xor;
+    const let op = kind == binary_kind::unsigned_less ? opcode::unsigned_less
+                   : kind == binary_kind::signed_less ? opcode::signed_less
+                   : kind == binary_kind::add_wrap    ? opcode::add_wrap
+                   : kind == binary_kind::bit_and     ? opcode::bit_and
+                   : kind == binary_kind::bit_or      ? opcode::bit_or
+                                                      : opcode::bit_xor;
     return {{.inputs = {left, right}}, source, {}, op, type};
   }
 
@@ -472,7 +475,11 @@ private:
       if (!operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::unsigned_less:
     case opcode::signed_less:
+      if (current.type != width::bits64)
+        return fail(error_code::invalid_type);
+      [[fallthrough]];
     case opcode::add_wrap:
     case opcode::bit_and:
     case opcode::bit_or:
@@ -562,16 +569,18 @@ private:
                              current.data.inputs.right.index,
                              current.data.inputs.left.index);
         break;
+      case opcode::unsigned_less:
       case opcode::signed_less:
       case opcode::add_wrap:
       case opcode::bit_and:
       case opcode::bit_or:
       case opcode::bit_xor: {
-        const let name = current.op == opcode::signed_less ? "icmp.slt"
-                         : current.op == opcode::add_wrap  ? "add"
-                         : current.op == opcode::bit_and   ? "and"
-                         : current.op == opcode::bit_or    ? "or"
-                                                           : "xor";
+        const let name = current.op == opcode::unsigned_less ? "icmp.ult"
+                         : current.op == opcode::signed_less ? "icmp.slt"
+                         : current.op == opcode::add_wrap    ? "add"
+                         : current.op == opcode::bit_and     ? "and"
+                         : current.op == opcode::bit_or      ? "or"
+                                                             : "xor";
         out = std::format_to(out, "  %v{} = {} i{} %v{}, %v{}", i, name, bits,
                              current.data.inputs.left.index,
                              current.data.inputs.right.index);
@@ -634,7 +643,8 @@ private:
     }
     if (current.op != opcode::add_wrap && current.op != opcode::bit_or &&
         current.op != opcode::bit_xor && current.op != opcode::bit_and &&
-        current.op != opcode::signed_less)
+        current.op != opcode::signed_less &&
+        current.op != opcode::unsigned_less)
       continue;
     const let &left = value.nodes()[current.data.inputs.left.index];
     const let &right = value.nodes()[current.data.inputs.right.index];
@@ -642,6 +652,9 @@ private:
       continue;
     std::uint64_t bits = 0;
     switch (current.op) {
+    case opcode::unsigned_less:
+      bits = left.data.immediate < right.data.immediate;
+      break;
     case opcode::signed_less:
       bits = std::bit_cast<std::int64_t>(left.data.immediate) <
              std::bit_cast<std::int64_t>(right.data.immediate);
