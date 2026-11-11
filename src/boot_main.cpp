@@ -131,8 +131,8 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
                model.rom.base.value, model.cpu.reset.value);
   if ((*board)->ios_entry())
     std::println("IOS loaded into RAM; entry={:#x}", *(*board)->ios_entry());
-  std::println("Boot probe: CP0, general TLB translation and C7200 controllers "
-               "remain unimplemented.");
+  std::println(
+      "ROM boot probe; execution stops at the loaded IOS entry point.");
   std::uint64_t executed = 0;
   for (;;) {
     const let result = (*board)->run_slice(budget - executed, 64, dump_ir);
@@ -161,6 +161,11 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
             if (physical && *physical >= window.range.base.value &&
                 *physical - window.range.base.value < window.range.size)
               std::println(stderr, "Device window: {}", window.name);
+        } else if (guest->code == jit::dispatch_error_code::invalid_pc &&
+                   !ios) {
+          std::println(
+              stderr,
+              "boot: no IOS image loaded; pass --ios ELF to reach handoff");
         } else
           std::println(stderr, "boot blocked at PC {:#x}: dispatcher error {}",
                        guest->pc, static_cast<unsigned>(guest->code));
@@ -175,6 +180,12 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
     executed += result->instructions;
     if (result->reason == jit::stop_reason::yielded)
       continue;
+    if (result->reason == jit::stop_reason::handoff) {
+      std::println("ROM handed off to IOS at {:#x} after {} instructions; IOS "
+                   "execution has not started.",
+                   (*board)->cpu().pc.value, executed);
+      return 0;
+    }
     std::println("Probe executed {} instructions; PC={:#x}; stop={}", executed,
                  (*board)->cpu().pc.value,
                  static_cast<unsigned>(result->reason));
@@ -197,7 +208,7 @@ fn main(int argc, char **argv) -> int {
             "[--dump-ir]\n"
             "Prepare the C++ NPE-400 chassis and probe ROM execution.\n"
             "Default ROM: stable/mips64_microcode. Exit 2 means boot is "
-            "blocked.");
+            "blocked; exit 0 includes a successful IOS handoff.");
         return 0;
       }
       if (argument == "--dump-ir") {

@@ -439,36 +439,49 @@ fn real_rom(const char *path) -> bool {
       instructions += result->instructions;
     }
   }();
-  if (!check(
-          output_ok && first == 0x0ff004a8 && !boot &&
-              std::holds_alternative<jit::dispatch_error>(boot.error().cause),
-          "real C7200 ROM reaches the current CPU implementation boundary"))
+  if (!check(output_ok && first == 0x0ff004a8 && boot &&
+                 boot->reason == jit::stop_reason::handoff,
+             "real C7200 ROM reaches the loaded ELF handoff boundary")) {
+    if (!boot &&
+        std::holds_alternative<jit::dispatch_error>(boot.error().cause))
+      std::println(stderr, "ROM stopped at {:#x}",
+                   std::get<jit::dispatch_error>(boot.error().cause).pc);
     return false;
-  const let &error = std::get<jit::dispatch_error>(boot.error().cause);
-  std::println(stderr, "ROM boundary {:#x}; console={:?}; log={:?}", error.pc,
-               std::string_view{output[0].data(), written[0]},
-               std::string_view{output[1].data(), written[1]});
+  }
+  const bool transferred =
+      check((*board)->cpu().pc.value == ios->entry() &&
+                (*board)->cpu().registers[20] == 0 &&
+                (*board)->cpu().registers[4] == 2 &&
+                (*board)->cpu().registers[5] == 0 &&
+                (*board)->cpu().registers[6] == 0 &&
+                (*board)->cpu().registers[8] == ios->entry() &&
+                (*board)->cpu().registers[26] == 0xffffffffbfc003e0ULL &&
+                (*board)->cpu().registers[31] == 0xffffffffbfc0068cULL &&
+                (*board)->cpu().registers[29] == ios->entry() - 64 &&
+                (*board)->cpu().cop0.registers[9] == 0 &&
+                (*board)->cpu().cop0.registers[11] == 1000000 &&
+                (*board)->memory().load<std::uint64_t>(
+                    {0xffffffff80003ff8ULL}) == 0xffffffffbfc00008ULL &&
+                std::string_view{output[0].data(), written[0]} ==
+                    "ROMMON emulation microcode.\n\nLaunching IOS image at "
+                    "0x80008000...\n" &&
+                std::string_view{output[1].data(), written[1]} ==
+                    "Microcode has started.\n",
+            "ROM transfers to the ELF entry with boot arguments and "
+            "callback state intact");
+  if (!transferred)
+    return false;
+  const let nvram_first =
+      (*board)->memory().load<std::uint8_t>({0xffffffffbe000080ULL});
+  (*board)->reset();
   return check(
-      error.code == jit::dispatch_error_code::invalid_pc &&
-          error.pc == ios->entry() &&
-          (*board)->cpu().pc.value == ios->entry() &&
-          (*board)->cpu().registers[4] == 2 &&
-          (*board)->cpu().registers[5] == 0 &&
-          (*board)->cpu().registers[6] == 0 &&
-          (*board)->cpu().registers[8] == ios->entry() &&
-          (*board)->cpu().registers[26] == 0xffffffffbfc003e0ULL &&
-          (*board)->cpu().registers[31] == 0xffffffffbfc0068cULL &&
-          (*board)->cpu().registers[29] == ios->entry() - 64 &&
-          (*board)->cpu().cop0.registers[9] == 0 &&
-          (*board)->cpu().cop0.registers[11] == 1000000 &&
-          (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
-              0xffffffffbfc00008ULL &&
-          std::string_view{output[0].data(), written[0]} ==
-              "ROMMON emulation microcode.\n\nLaunching IOS image at "
-              "0x80008000...\n" &&
-          std::string_view{output[1].data(), written[1]} ==
-              "Microcode has started.\n",
-      "real ROM prints both startup messages before the next CPU boundary");
+      (*board)->cpu().pc.value == dynamips::c7200::npe400.cpu.reset.value &&
+          (*board)->cpu().cop0.registers[12] == 0x00400000 &&
+          (*board)->cpu().cop0.registers[15] == 0x2721 &&
+          (*board)->cpu().cop0.registers[11] == 0 && nvram_first &&
+          (*board)->memory().load<std::uint8_t>({0xffffffffbe000080ULL}) ==
+              *nvram_first,
+      "reset restores CP0 bootstrap state and preserves initialized NVRAM");
 }
 } // namespace
 

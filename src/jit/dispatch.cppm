@@ -44,7 +44,7 @@ struct dispatch_error {
   amd64::error compilation{};
   std::optional<std::uint64_t> branch_pc{};
 };
-enum class stop_reason { completed, budget_exhausted, yielded };
+enum class stop_reason { completed, budget_exhausted, yielded, handoff };
 
 struct dispatch_result {
   stop_reason reason;
@@ -63,12 +63,18 @@ public:
 
   [[nodiscard]] static fn
   create(std::span<const mips64::instruction_word> image,
-         mips64::guest_address start, memory::address_space &memory) noexcept
+         mips64::guest_address start, memory::address_space &memory,
+         std::optional<mips64::guest_address> handoff = {}) noexcept
       -> std::expected<std::unique_ptr<dispatcher>, dispatch_error> {
     if (start.value % 4 || image.size() > 65536 ||
         image.size() > (UINT64_MAX - start.value) / 4)
       return std::unexpected(
           dispatch_error{dispatch_error_code::invalid_image, start.value});
+    if (handoff && (handoff->value % 4 ||
+                    (handoff->value >= start.value &&
+                     handoff->value - start.value < image.size() * 4)))
+      return std::unexpected(
+          dispatch_error{dispatch_error_code::invalid_image, handoff->value});
     let compiler = amd64::compiler::create();
     if (!compiler)
       return std::unexpected(dispatch_error{dispatch_error_code::compilation,
@@ -78,7 +84,7 @@ public:
                                             compiler.error()});
     try {
       let result = std::unique_ptr<dispatcher>{
-          new dispatcher{start, memory, std::move(*compiler)}};
+          new dispatcher{start, memory, std::move(*compiler), handoff}};
       result->image_.assign(image.begin(), image.end());
       result->cache_.resize(image.size());
       if (!memory.seal_executable_pages())
@@ -98,6 +104,10 @@ public:
     dispatch_result result{stop_reason::yielded, 0, 0, 0};
     const let end = start_.value + image_.size() * 4;
     while (true) {
+      if (handoff_ && state.pc.value == handoff_->value) {
+        result.reason = stop_reason::handoff;
+        return result;
+      }
       if (state.pc.value == end) {
         result.reason = stop_reason::completed;
         return result;
@@ -162,12 +172,14 @@ private:
   std::vector<mips64::instruction_word> image_;
   std::vector<cached_block> cache_;
   std::uint64_t generation_;
+  std::optional<mips64::guest_address> handoff_;
   alignas(std::max_align_t) std::array<std::byte, 64 * 1024> scratch_;
 
   dispatcher(mips64::guest_address start, memory::address_space &memory,
-             amd64::compiler compiler) noexcept
+             amd64::compiler compiler,
+             std::optional<mips64::guest_address> handoff) noexcept
       : start_(start), memory_(memory), compiler_(std::move(compiler)),
-        generation_(memory.mapping_generation()) {}
+        generation_(memory.mapping_generation()), handoff_(handoff) {}
 
   fn compile(std::size_t index, bool dump_ir) noexcept
       -> std::expected<void, dispatch_error> {

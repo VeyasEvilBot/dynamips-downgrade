@@ -797,6 +797,64 @@ fn branch_likely() -> void {
   }
 }
 
+fn handoff_boundary() -> void {
+  namespace mem = jit::memory;
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(memory &&
+              (*memory)
+                  ->map_ram({0x1000}, {0},
+                            mem::permission::read | mem::permission::write)
+                  .has_value(),
+          "map handoff code");
+  constexpr std::array words{mips::instruction_word{0x0c004000},
+                             mips::instruction_word{0}};
+  for (std::size_t i = 0; i < words.size(); i++)
+    require((*memory)
+                ->store<std::uint32_t>({0x1000 + i * 4}, words[i].bits)
+                .has_value(),
+            "load handoff code");
+  require(
+      (*memory)
+          ->protect({0x1000}, mem::permission::read | mem::permission::execute)
+          .has_value(),
+      "protect handoff code");
+  let program = jit::dispatcher::create(words, {0x1000}, **memory,
+                                         mips::guest_address{0x10000});
+  require(program.has_value(), "create configured handoff");
+  mips::state state{};
+  state.pc = {0x1000};
+  const let short_slice = (*program)->run_slice(state, 1);
+  require(short_slice &&
+              short_slice->reason == jit::stop_reason::budget_exhausted &&
+              state.registers[31] == 0,
+          "handoff cannot bypass the call budget");
+  const let result = (*program)->run_slice(state, 2);
+  require(result && result->reason == jit::stop_reason::handoff &&
+              result->instructions == 2 && state.pc.value == 0x10000 &&
+              state.registers[31] == 0x1008,
+          "handoff stops after the call and its delay slot");
+  const let stopped = (*program)->run_slice(state, 0);
+  require(stopped && stopped->reason == jit::stop_reason::handoff &&
+              stopped->instructions == 0,
+          "handoff does not execute target instructions on subsequent slices");
+  require(!jit::dispatcher::create(words, {0x1000}, **memory,
+                                   mips::guest_address{0x10001}) &&
+              !jit::dispatcher::create(words, {0x1000}, **memory,
+                                       mips::guest_address{0x1004}),
+          "reject unaligned and in-image handoff targets");
+  let wrong = jit::dispatcher::create(words, {0x1000}, **memory,
+                                       mips::guest_address{0x20000});
+  require(wrong.has_value(), "create different handoff target");
+  state = {};
+  state.pc = {0x1000};
+  const let rejected = (*wrong)->run_slice(state, 10);
+  require(!rejected &&
+              rejected.error().code == jit::dispatch_error_code::invalid_pc &&
+              rejected.error().pc == 0x10000,
+          "an unconfigured out-of-image jump is still an error");
+}
+
 fn register_call() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -1193,6 +1251,7 @@ fn main(int argc, char **argv) -> int {
   example_program();
   branches_and_dispatch();
   branch_likely();
+  handoff_boundary();
   register_call();
   register_jump();
   direct_jump();

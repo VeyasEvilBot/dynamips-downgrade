@@ -225,8 +225,10 @@ public:
           word = std::byteswap(word);
         result->boot_[i] = {word};
       }
-      let dispatch = jit::dispatcher::create(result->boot_, model.cpu.reset,
-                                              *result->memory_);
+      let dispatch = jit::dispatcher::create(
+          result->boot_, model.cpu.reset, *result->memory_,
+          ios ? std::optional{jit::mips64::guest_address{ios->entry()}}
+              : std::nullopt);
       if (!dispatch)
         return std::unexpected(setup_error{dispatch.error()});
       result->dispatch_ = std::move(*dispatch);
