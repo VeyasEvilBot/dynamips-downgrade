@@ -445,7 +445,8 @@ fn cop0_writes() -> void {
     alignas(std::max_align_t) std::array<std::byte, 8192> storage;
     std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                               std::pmr::null_memory_resource()};
-    const std::array words{mips::instruction_word{0x40810000u | (slot << 11)}};
+    const std::array words{mips::instruction_word{0x40810000u | (slot << 11)},
+                           mips::instruction_word{0x40020000u | (slot << 11)}};
     let block = mips::translate(words, {0x1000}, arena);
     require(block.has_value(), "translate MTC0");
     let native = compiler->compile(*block, arena);
@@ -465,6 +466,9 @@ fn cop0_writes() -> void {
                 cop0.registers[slot] ==
                     (slot == 15 || slot == 16 ? 0x1234u : 0x87654321u),
             "MTC0 stores low 32 bits and preserves read-only registers");
+    require(state[2] == static_cast<std::uint64_t>(std::int64_t{
+                            static_cast<std::int32_t>(cop0.registers[slot])}),
+            "MFC0 sign extends the low word into a guest register");
     if (slot == 11)
       require(cop0.registers[13] == 1,
               "Compare write clears pending timer interrupt");

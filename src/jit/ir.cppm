@@ -44,6 +44,7 @@ enum class opcode : std::uint8_t {
   bit_xor,
   write_state,
   write_cop0,
+  read_cop0,
   load8_signed,
   load32_signed,
   load64,
@@ -112,6 +113,11 @@ struct node {
             slot,
             opcode::write_state,
             width::bits64};
+  }
+
+  static constexpr fn read_cop0(state_slot slot, std::uint32_t source) noexcept
+      -> node {
+    return {{.immediate = 0}, source, slot, opcode::read_cop0, width::bits64};
   }
 
   static constexpr fn write_cop0(state_slot slot, value_id value,
@@ -406,6 +412,7 @@ private:
           current.data.immediate > std::numeric_limits<std::uint32_t>::max())
         return fail(error_code::invalid_operand);
       break;
+    case opcode::read_cop0:
     case opcode::write_cop0:
       if (current.slot.index != 9 && current.slot.index != 11 &&
           current.slot.index != 12 && current.slot.index != 13 &&
@@ -413,7 +420,8 @@ private:
         return fail(error_code::invalid_slot);
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
-      if (!operand_valid(current.data.inputs.left))
+      if (current.op == opcode::write_cop0 &&
+          !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
     case opcode::read_state:
@@ -481,6 +489,10 @@ private:
         break;
       case opcode::read_state:
         out = std::format_to(out, "  %v{} = state.read i64 %state, {}", i,
+                             current.slot.index);
+        break;
+      case opcode::read_cop0:
+        out = std::format_to(out, "  %v{} = cop0.read.s32 {}", i,
                              current.slot.index);
         break;
       case opcode::write_cop0:

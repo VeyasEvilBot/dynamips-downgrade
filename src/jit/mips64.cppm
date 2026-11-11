@@ -136,6 +136,7 @@ struct error {
     const let rt = static_cast<std::uint16_t>((bits >> 16) & 31);
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
     const let function = bits & 63;
+    const bool mfc0 = opcode == 0x10 && rs == 0;
     const bool mtc0 = opcode == 0x10 && rs == 4;
     const bool lui = opcode == 0x0f;
     const bool addiu = opcode == 0x09;
@@ -147,19 +148,21 @@ struct error {
     const bool jump = opcode == 2 || opcode == 3;
     const bool indirect = opcode == 0 && function == 8;
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !(opcode == 0 && (function == 0x26 || function == 0x2d)))
+        !mtc0 && !mfc0 &&
+        !(opcode == 0 && (function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && ((bits >> 6) & 31) != 0)
+        !mtc0 && !mfc0 && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
-    if (mtc0 && ((bits & 0x7ff) != 0 || (rd != 9 && rd != 11 && rd != 12 &&
-                                         rd != 13 && rd != 15 && rd != 16)))
+    if ((mtc0 || mfc0) &&
+        ((bits & 0x7ff) != 0 ||
+         (rd != 9 && rd != 11 && rd != 12 && rd != 13 && rd != 15 && rd != 16)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (indirect && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0))
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (lui && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
-    const let destination = immediate || memory_access ? rt : rd;
+    const let destination = mfc0 || immediate || memory_access ? rt : rd;
     if (destination == 0 && !memory_access && !branch && !jump && !indirect &&
         !mtc0)
       continue;
@@ -212,6 +215,16 @@ struct error {
       }
       return registers[index];
     };
+    if (mfc0) {
+      const let value = result.append(ir::node::read_cop0({rd}, source));
+      if (!value)
+        return failed(value.error());
+      if (let written = result.append(ir::node::write({rt}, *value, source));
+          !written)
+        return failed(written.error());
+      registers[rt] = *value;
+      continue;
+    }
     if (mtc0) {
       const let value = read(rt);
       if (!value)

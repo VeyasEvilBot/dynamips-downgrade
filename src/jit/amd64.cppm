@@ -175,6 +175,12 @@ private:
     }
   }
 
+  static fn read_cop0(execution_context *context, std::uint32_t slot) noexcept
+      -> std::uint64_t {
+    return static_cast<std::uint64_t>(std::int64_t{
+        std::bit_cast<std::int32_t>(context->cop0->registers[slot])});
+  }
+
   static fn write_cop0(execution_context *context, std::uint32_t slot,
                         std::uint64_t value) noexcept -> void {
     context->cop0->write(static_cast<std::uint16_t>(slot),
@@ -409,6 +415,24 @@ public:
             return failure(emitted, i);
           continue;
         }
+        if (node.op == ir::opcode::read_cop0) {
+          uses_cop0 = true;
+          const let result = output.newUInt64();
+          if (errors.code)
+            return failure(errors.code, i);
+          values[i] = result;
+          asmjit::InvokeNode *call = nullptr;
+          if (const let status = output.invoke(
+                  &call, asmjit::Imm{&compiled_block::read_cop0},
+                  asmjit::FuncSignature::build<
+                      std::uint64_t, compiled_block::execution_context *,
+                      std::uint32_t>()))
+            return failure(status, i);
+          call->setArg(0, context);
+          call->setArg(1, asmjit::Imm{node.slot.index});
+          call->setRet(0, result);
+          continue;
+        }
         if (node.op == ir::opcode::write_cop0) {
           uses_cop0 = true;
           const let value = operand(node.data.inputs.left);
@@ -492,6 +516,7 @@ public:
           }
           break;
         }
+        case ir::opcode::read_cop0:
         case ir::opcode::write_cop0:
         case ir::opcode::write_state:
         case ir::opcode::load8_signed:
