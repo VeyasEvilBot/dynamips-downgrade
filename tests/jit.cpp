@@ -437,6 +437,39 @@ fn mmio_console() -> void {
               console.output().size() == jit::uart::capacity,
           "full console faults without overwriting the buffer");
 }
+fn byte_stores() -> void {
+  namespace mem = jit::memory;
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(
+      memory &&
+          (*memory)->map_ram({0x8000}, {0}, mem::permission::write).has_value(),
+      "map byte store RAM");
+  alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{mips::instruction_word{0xa0220001}};
+  let block = mips::translate(words, {0x1000}, arena);
+  let compiler = amd64::compiler::create();
+  require(block && compiler, "prepare SB");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile SB");
+  std::array<std::uint64_t, 32> state{};
+  state[1] = 0x8000;
+  for (unsigned value = 0; value < 256; value++) {
+    state[2] = 0x12340000u | value;
+    require(native->run(state, **memory).has_value() &&
+                ram[1] == static_cast<std::byte>(value) &&
+                ram[0] == std::byte{} && ram[2] == std::byte{},
+            "SB writes only its low byte at an unaligned address");
+  }
+  state[1] = 0x8fff;
+  const let fault = native->run(state, **memory);
+  require(!fault && fault.error().pc == 0x1000 &&
+              fault.error().access.address.value == 0x9000,
+          "SB reports an unmapped byte address");
+}
+
 fn signed_byte_loads() -> void {
   namespace mem = jit::memory;
   std::array<std::byte, mem::page_size> ram{};
@@ -1004,6 +1037,7 @@ fn main(int argc, char **argv) -> int {
   immediate_operands();
   observed_stores();
   memory_operations();
+  byte_stores();
   signed_byte_loads();
   mmio_console();
   example_program();

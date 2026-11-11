@@ -46,13 +46,14 @@ enum class opcode : std::uint8_t {
   load8_signed,
   load32_signed,
   load64,
+  store8,
   store32,
   store64,
 };
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
-  return op != opcode::write_state && op != opcode::store32 &&
-         op != opcode::store64;
+  return op != opcode::write_state && op != opcode::store8 &&
+         op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t { add_wrap, bit_and, bit_or, bit_xor };
@@ -127,6 +128,15 @@ struct node {
             source,
             {},
             size == width::bits32 ? opcode::load32_signed : opcode::load64,
+            width::bits64};
+  }
+
+  static constexpr fn store8(value_id address, value_id value,
+                              std::uint32_t source) noexcept -> node {
+    return {{.inputs = {address, value}},
+            source,
+            {},
+            opcode::store8,
             width::bits64};
   }
 
@@ -413,6 +423,7 @@ private:
     case opcode::load8_signed:
     case opcode::load32_signed:
     case opcode::load64:
+    case opcode::store8:
     case opcode::store32:
     case opcode::store64:
       if (current.type != width::bits64)
@@ -466,10 +477,13 @@ private:
                                                                    : "i64",
                              current.data.inputs.left.index);
         break;
+      case opcode::store8:
       case opcode::store32:
       case opcode::store64:
         out = std::format_to(out, "  store.guest i{} %v{}, %v{}",
-                             current.op == opcode::store32 ? 32 : 64,
+                             current.op == opcode::store8    ? 8
+                             : current.op == opcode::store32 ? 32
+                                                             : 64,
                              current.data.inputs.right.index,
                              current.data.inputs.left.index);
         break;

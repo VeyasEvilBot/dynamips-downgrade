@@ -319,8 +319,8 @@ public:
           continue;
         if (node.op == ir::opcode::load8_signed ||
             node.op == ir::opcode::load32_signed ||
-            node.op == ir::opcode::load64 || node.op == ir::opcode::store32 ||
-            node.op == ir::opcode::store64) {
+            node.op == ir::opcode::load64 || node.op == ir::opcode::store8 ||
+            node.op == ir::opcode::store32 || node.op == ir::opcode::store64) {
           uses_memory = true;
           const let address = operand(node.data.inputs.left);
           if (!address)
@@ -349,7 +349,9 @@ public:
             const let value = operand(node.data.inputs.right);
             if (!value)
               return failure(value.error(), i);
-            const let target = node.op == ir::opcode::store32
+            const let target = node.op == ir::opcode::store8
+                                   ? &compiled_block::store<std::uint8_t>
+                               : node.op == ir::opcode::store32
                                    ? &compiled_block::store<std::uint32_t>
                                    : &compiled_block::store<std::uint64_t>;
             status =
@@ -456,6 +458,7 @@ public:
         case ir::opcode::load8_signed:
         case ir::opcode::load32_signed:
         case ir::opcode::load64:
+        case ir::opcode::store8:
         case ir::opcode::store32:
         case ir::opcode::store64:
           break;
