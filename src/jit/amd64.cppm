@@ -144,6 +144,9 @@ private:
       context->failed = true;
       return 0;
     }
+    if constexpr (sizeof(T) == 1)
+      return static_cast<std::uint64_t>(
+          std::int64_t{std::bit_cast<std::int8_t>(*result)});
     if constexpr (sizeof(T) == 4)
       return static_cast<std::uint64_t>(
           std::int64_t{std::bit_cast<std::int32_t>(*result)});
@@ -286,7 +289,8 @@ public:
         const let &node = block.nodes()[i];
         if (node.op == ir::opcode::constant)
           continue;
-        if (node.op == ir::opcode::load32_signed ||
+        if (node.op == ir::opcode::load8_signed ||
+            node.op == ir::opcode::load32_signed ||
             node.op == ir::opcode::load64 || node.op == ir::opcode::store32 ||
             node.op == ir::opcode::store64) {
           uses_memory = true;
@@ -300,7 +304,9 @@ public:
             if (errors.code)
               return failure(errors.code, i);
             values[i] = result;
-            const let target = node.op == ir::opcode::load32_signed
+            const let target = node.op == ir::opcode::load8_signed
+                                   ? &compiled_block::load<std::uint8_t>
+                               : node.op == ir::opcode::load32_signed
                                    ? &compiled_block::load<std::uint32_t>
                                    : &compiled_block::load<std::uint64_t>;
             status = output.invoke(
@@ -416,6 +422,7 @@ public:
           break;
         }
         case ir::opcode::write_state:
+        case ir::opcode::load8_signed:
         case ir::opcode::load32_signed:
         case ir::opcode::load64:
         case ir::opcode::store32:

@@ -429,6 +429,42 @@ fn mmio_console() -> void {
               console.output().size() == jit::uart::capacity,
           "full console faults without overwriting the buffer");
 }
+fn signed_byte_loads() -> void {
+  namespace mem = jit::memory;
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(
+      memory &&
+          (*memory)->map_ram({0x8000}, {0}, mem::permission::read).has_value(),
+      "map byte load RAM");
+  alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{mips::instruction_word{0x80220001}};
+  let block = mips::translate(words, {0x1000}, arena);
+  let compiler = amd64::compiler::create();
+  require(block && compiler, "prepare signed byte load");
+  require(ir::optimize(*block, ir::fold_constants).has_value(),
+          "optimize byte load");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile signed byte load");
+  std::array<std::uint64_t, 32> state{};
+  state[1] = 0x8000;
+  for (unsigned value = 0; value < 256; value++) {
+    ram[1] = static_cast<std::byte>(value);
+    const let result = native->run(state, **memory);
+    require(result && state[2] == static_cast<std::uint64_t>(
+                                      value < 128 ? std::int64_t{value}
+                                                  : std::int64_t{value} - 256),
+            "LB sign extends every byte at an unaligned address");
+  }
+  state[1] = 0x8fff;
+  const let fault = native->run(state, **memory);
+  require(!fault && fault.error().pc == 0x1000 &&
+              fault.error().access.address.value == 0x9000,
+          "byte load reports exact unmapped address");
+}
+
 fn branches_and_dispatch() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -842,6 +878,7 @@ fn main(int argc, char **argv) -> int {
   immediate_operands();
   observed_stores();
   memory_operations();
+  signed_byte_loads();
   mmio_console();
   example_program();
   branches_and_dispatch();

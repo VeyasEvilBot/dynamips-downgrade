@@ -92,8 +92,8 @@ struct error {
   const let extra_nodes = static_cast<std::size_t>(
       std::ranges::count_if(words, [](instruction_word word) {
         const let op = word.bits >> 26;
-        return op == 0x09 || op == 0x23 || op == 0x2b || op == 0x37 ||
-               op == 0x3f;
+        return op == 0x09 || op == 0x20 || op == 0x23 || op == 0x2b ||
+               op == 0x37 || op == 0x3f;
       }));
   if (extra_nodes > std::numeric_limits<std::uint32_t>::max() ||
       words.size() > (std::numeric_limits<std::uint32_t>::max() - extra_nodes) /
@@ -125,7 +125,7 @@ struct error {
     const bool lui = opcode == 0x0f;
     const bool addiu = opcode == 0x09;
     const bool immediate = opcode == 0x0d || lui || addiu;
-    const bool load = opcode == 0x23 || opcode == 0x37;
+    const bool load = opcode == 0x20 || opcode == 0x23 || opcode == 0x37;
     const bool store = opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
     const bool branch = is_branch(words[i]);
@@ -227,7 +227,9 @@ struct error {
             !written)
           return failed(written.error());
       } else {
-        const let value = result.append(ir::node::load(*address, source, size));
+        const let value = result.append(
+            opcode == 0x20 ? ir::node::load8_signed(*address, source)
+                           : ir::node::load(*address, source, size));
         if (!value)
           return failed(value.error());
         if (destination != 0) {
