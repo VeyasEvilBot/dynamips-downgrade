@@ -464,25 +464,31 @@ fn mmio_console() -> void {
 fn word_shifts() -> void {
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create word shift compiler");
-  for (std::uint32_t amount = 0; amount < 32; amount++) {
-    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
-    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
-                                              std::pmr::null_memory_resource()};
-    const std::array words{
-        mips::instruction_word{(1u << 16) | (2u << 11) | (amount << 6) | 2u}};
-    let block = mips::translate(words, {0x1000}, arena);
-    require(block.has_value(), "translate SRL");
-    let native = compiler->compile(*block, arena);
-    require(native.has_value(), "compile SRL");
-    for (const std::uint64_t bits :
-         {0ULL, 0x80000000ULL, 0xffffffffULL, 0x1234567887654321ULL}) {
-      std::array<std::uint64_t, 32> state{};
-      state[1] = bits;
-      const let word = static_cast<std::uint32_t>(bits) >> amount;
-      require(native->run(state).has_value() &&
-                  state[2] == static_cast<std::uint64_t>(std::int64_t{
-                                  std::bit_cast<std::int32_t>(word)}),
-              "SRL shifts the low word and sign extends its result");
+  for (const unsigned function : {2u, 3u}) {
+    for (std::uint32_t amount = 0; amount < 32; amount++) {
+      alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+      std::pmr::monotonic_buffer_resource arena{
+          storage.data(), storage.size(), std::pmr::null_memory_resource()};
+      const std::array words{mips::instruction_word{(1u << 16) | (2u << 11) |
+                                                    (amount << 6) | function}};
+      let block = mips::translate(words, {0x1000}, arena);
+      require(block.has_value(), "translate SRL");
+      let native = compiler->compile(*block, arena);
+      require(native.has_value(), "compile SRL");
+      for (const std::uint64_t bits :
+           {0ULL, 0x80000000ULL, 0xffffffffULL, 0x1234567887654321ULL}) {
+        std::array<std::uint64_t, 32> state{};
+        state[1] = bits;
+        const let low = static_cast<std::uint32_t>(bits);
+        const let word = function == 2
+                             ? low >> amount
+                             : std::bit_cast<std::uint32_t>(
+                                   std::bit_cast<std::int32_t>(low) >> amount);
+        require(native->run(state).has_value() &&
+                    state[2] == static_cast<std::uint64_t>(std::int64_t{
+                                    std::bit_cast<std::int32_t>(word)}),
+                "SRL shifts the low word and sign extends its result");
+      }
     }
   }
 }

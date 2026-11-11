@@ -136,7 +136,7 @@ struct error {
     const let rt = static_cast<std::uint16_t>((bits >> 16) & 31);
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
     const let function = bits & 63;
-    const bool srl = opcode == 0 && function == 2;
+    const bool word_shift = opcode == 0 && (function == 2 || function == 3);
     const bool mfc0 = opcode == 0x10 && rs == 0;
     const bool mtc0 = opcode == 0x10 && rs == 4;
     const bool lui = opcode == 0x0f;
@@ -152,13 +152,13 @@ struct error {
     const bool jump = opcode == 2 || opcode == 3;
     const bool indirect = opcode == 0 && function == 8;
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !srl &&
+        !mtc0 && !mfc0 && !word_shift &&
         !(opcode == 0 && (function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !srl && ((bits >> 6) & 31) != 0)
+        !mtc0 && !mfc0 && !word_shift && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
-    if (srl && rs != 0)
+    if (word_shift && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((mtc0 || mfc0) &&
         ((bits & 0x7ff) != 0 ||
@@ -221,12 +221,15 @@ struct error {
       }
       return registers[index];
     };
-    if (srl) {
+    if (word_shift) {
       const let input = read(rt);
       if (!input)
         return failed(input.error());
       const let value = result.append(
-          ir::node::shift_right32(*input, (bits >> 6) & 31, source));
+          function == 2
+              ? ir::node::shift_right32(*input, (bits >> 6) & 31, source)
+              : ir::node::shift_right_arithmetic32(*input, (bits >> 6) & 31,
+                                                   source));
       if (!value)
         return failed(value.error());
       if (let written = result.append(ir::node::write({rd}, *value, source));

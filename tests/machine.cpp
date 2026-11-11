@@ -450,15 +450,16 @@ fn real_rom(const char *path) -> bool {
                std::string_view{output[1].data(), written[1]});
   return check(
       error.code == jit::dispatch_error_code::translation &&
-          error.pc == 0xffffffffbfc00ce4ULL &&
-          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x00111603 &&
-          (*board)->cpu().registers[29] == 0xffffffff80003f78ULL &&
+          error.pc == 0xffffffffbfc00668ULL &&
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x67bdffc0 &&
+          (*board)->cpu().registers[29] == 0xffffffff80003fc8ULL &&
           (*board)->cpu().cop0.registers[9] == 0 &&
           (*board)->cpu().cop0.registers[11] == 1000000 &&
           (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
               0xffffffffbfc00008ULL &&
           std::string_view{output[0].data(), written[0]} ==
-              "ROMMON emulation microcode.\n\nLaunching IOS image at 0x8" &&
+              "ROMMON emulation microcode.\n\nLaunching IOS image at "
+              "0x80008000...\n" &&
           std::string_view{output[1].data(), written[1]} ==
               "Microcode has started.\n",
       "real ROM prints both startup messages before the next CPU boundary");
