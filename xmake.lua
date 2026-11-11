@@ -247,7 +247,7 @@ target("machine-core")
     add_includedirs("include")
     add_deps("jit-core", { public = true })
     add_packages("libelf", { public = true })
-    add_files("src/machine/*.cppm", { public = true })
+    add_files("src/machine/*.cppm", "src/devices/rom_services.cppm", { public = true })
 target_end()
 
 target("c7200-boot")
