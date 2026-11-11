@@ -222,6 +222,7 @@ public:
           observed[node.slot.index] = 0;
           break;
         case ir::opcode::constant:
+        case ir::opcode::sign_extend32:
         case ir::opcode::add_wrap:
         case ir::opcode::bit_or:
         case ir::opcode::bit_xor:
@@ -372,6 +373,13 @@ public:
         switch (node.op) {
         case ir::opcode::constant:
           break;
+        case ir::opcode::sign_extend32: {
+          const let input = operand(node.data.inputs.left);
+          if (!input)
+            return failure(input.error(), i);
+          status = output.movsxd(result, input->r32());
+          break;
+        }
         case ir::opcode::read_state:
           status = output.mov(result,
                               asmjit::x86::Mem{state, node.slot.index * 8, 8});

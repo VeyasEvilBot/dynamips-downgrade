@@ -37,6 +37,7 @@ enum class width : std::uint8_t { bits32 = 32, bits64 = 64 };
 enum class opcode : std::uint8_t {
   constant,
   read_state,
+  sign_extend32,
   add_wrap,
   bit_or,
   bit_xor,
@@ -79,6 +80,15 @@ struct node {
   static constexpr fn read(state_slot slot, std::uint32_t source) noexcept
       -> node {
     return {{.immediate = 0}, source, slot, opcode::read_state, width::bits64};
+  }
+
+  static constexpr fn sign_extend32(value_id value,
+                                     std::uint32_t source) noexcept -> node {
+    return {{.inputs = {value, {}}},
+            source,
+            {},
+            opcode::sign_extend32,
+            width::bits64};
   }
 
   static constexpr fn binary(binary_kind kind, value_id left, value_id right,
@@ -336,6 +346,12 @@ private:
           !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::sign_extend32:
+      if (current.type != width::bits64)
+        return fail(error_code::invalid_type);
+      if (!operand_valid(current.data.inputs.left))
+        return fail(error_code::invalid_operand);
+      break;
     case opcode::add_wrap:
     case opcode::bit_or:
     case opcode::bit_xor:
@@ -375,6 +391,10 @@ private:
       case opcode::constant:
         out = std::format_to(out, "  %v{} = const i{} {}", i, bits,
                              current.data.immediate);
+        break;
+      case opcode::sign_extend32:
+        out = std::format_to(out, "  %v{} = sext.i32 i64 %v{}", i,
+                             current.data.inputs.left.index);
         break;
       case opcode::read_state:
         out = std::format_to(out, "  %v{} = state.read i64 %state, {}", i,
@@ -438,6 +458,17 @@ private:
     return std::unexpected(valid.error());
   std::size_t folded = 0;
   for (let &current : value.edit_nodes()) {
+    if (current.op == opcode::sign_extend32) {
+      const let &input = value.nodes()[current.data.inputs.left.index];
+      if (input.op == opcode::constant) {
+        const let bits =
+            static_cast<std::uint64_t>(std::int64_t{static_cast<std::int32_t>(
+                static_cast<std::uint32_t>(input.data.immediate))});
+        current = node::constant(bits, current.source_index);
+        folded++;
+      }
+      continue;
+    }
     if (current.op != opcode::add_wrap && current.op != opcode::bit_or &&
         current.op != opcode::bit_xor)
       continue;

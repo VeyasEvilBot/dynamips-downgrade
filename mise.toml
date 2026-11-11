@@ -55,6 +55,11 @@ run = "xmake test --output-on-failure 'jit-test/devices' 'memory-test/*' 'device
 description = "test real Unix console streams, backpressure and cancellation"
 run = "xmake test --output-on-failure 'console-test/*'"
 
+[tasks."test:boot"]
+description = "gate each boot change with JIT semantics and the real C7200 ROM boundary"
+# Rebuild module consumers together to avoid stale Clang BMI crashes.
+run = "xmake build -r -y jit-test machine-test && xmake test --output-on-failure 'jit-test/*' 'machine-test/*'"
+
 [tasks."test:machine"]
 description = "test chassis composition, ELF loading and the real C7200 ROM boot boundary"
 run = "xmake test --output-on-failure 'machine-test/*'"

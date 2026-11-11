@@ -89,21 +89,21 @@ struct error {
     break;
   }
   constexpr std::size_t nodes_per_instruction = 4;
-  const let memory_instructions = static_cast<std::size_t>(
+  const let extra_nodes = static_cast<std::size_t>(
       std::ranges::count_if(words, [](instruction_word word) {
         const let op = word.bits >> 26;
-        return op == 0x23 || op == 0x2b || op == 0x37 || op == 0x3f;
+        return op == 0x09 || op == 0x23 || op == 0x2b || op == 0x37 ||
+               op == 0x3f;
       }));
-  if (memory_instructions > std::numeric_limits<std::uint32_t>::max() ||
-      words.size() >
-          (std::numeric_limits<std::uint32_t>::max() - memory_instructions) /
-              nodes_per_instruction ||
+  if (extra_nodes > std::numeric_limits<std::uint32_t>::max() ||
+      words.size() > (std::numeric_limits<std::uint32_t>::max() - extra_nodes) /
+                         nodes_per_instruction ||
       words.size() >
           (std::numeric_limits<std::uint64_t>::max() - start.value) / 4)
     return std::unexpected(error{error_code::block_too_large, 0});
   let created = ir::block::create(
       {start.value, static_cast<std::uint32_t>(words.size()), 32},
-      words.size() * nodes_per_instruction + memory_instructions, memory);
+      words.size() * nodes_per_instruction + extra_nodes, memory);
   if (!created)
     return std::unexpected(
         error{created.error().code == ir::error_code::out_of_memory
@@ -123,7 +123,8 @@ struct error {
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
     const let function = bits & 63;
     const bool lui = opcode == 0x0f;
-    const bool immediate = opcode == 0x0d || lui;
+    const bool addiu = opcode == 0x09;
+    const bool immediate = opcode == 0x0d || lui || addiu;
     const bool load = opcode == 0x23 || opcode == 0x37;
     const bool store = opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
@@ -240,17 +241,27 @@ struct error {
       continue;
     }
     const let right =
-        immediate ? result.append(ir::node::constant(bits & 0xffff, source))
+        immediate ? result.append(ir::node::constant(
+                        addiu ? static_cast<std::uint64_t>(std::int64_t{
+                                    static_cast<std::int16_t>(bits & 0xffff)})
+                              : bits & 0xffff,
+                        source))
                   : read(rt);
     if (!right)
       return failed(right.error());
-    const let operation = immediate          ? ir::binary_kind::bit_or
+    const let operation = addiu       ? ir::binary_kind::add_wrap
+                          : immediate ? ir::binary_kind::bit_or
                           : function == 0x26 ? ir::binary_kind::bit_xor
                                              : ir::binary_kind::add_wrap;
-    const let value =
+    let value =
         result.append(ir::node::binary(operation, *left, *right, source));
     if (!value)
       return failed(value.error());
+    if (addiu) {
+      value = result.append(ir::node::sign_extend32(*value, source));
+      if (!value)
+        return failed(value.error());
+    }
     if (let written =
             result.append(ir::node::write({destination}, *value, source));
         !written)

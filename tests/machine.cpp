@@ -279,13 +279,15 @@ fn real_rom(const char *path) -> bool {
     return false;
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
   return check(
-      error.code == jit::dispatch_error_code::translation &&
-          error.pc == 0xffffffffbfc012a4ULL &&
+      error.code == jit::dispatch_error_code::memory &&
+          error.pc == 0xffffffffbfc012b0ULL &&
+          error.access.reason == jit::memory::fault_reason::unmapped &&
+          error.access.address.value == 0xfffffffffffffff8ULL &&
+          (*board)->cpu().registers[29] == 0xffffffffffffffc8ULL &&
+          (*board)->cpu().registers[5] == 0xffffffffbfc02710ULL &&
           (*board)->cpu().registers[31] == 0xffffffffbfc00008ULL &&
-          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x27bdffc8 &&
-          (*board)->cpu().pc.value == 0xffffffffbfc012a0ULL,
-      "execute ROM JAL and report the next unimplemented instruction without "
-      "claiming IOS boot");
+          (*board)->cpu().pc.value == error.pc,
+      "ROM address arithmetic reaches the missing boot stack initialization");
 }
 } // namespace
 
