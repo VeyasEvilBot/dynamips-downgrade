@@ -602,11 +602,38 @@ fn branches_and_dispatch() -> void {
           "reject branch in delay slot");
 }
 
+fn direct_jump() -> void {
+  alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{mips::instruction_word{0x0bf0030c},
+                             mips::instruction_word{0x34010007},
+                             mips::instruction_word{0xffffffff}};
+  let block = mips::translate(words, {0xffffffffbfc00c08ULL}, arena);
+  let compiler = amd64::compiler::create();
+  require(block && compiler && block->info().instruction_count == 2,
+          "J includes only its delay slot");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile J");
+  std::array<std::uint64_t, 32> state{};
+  state[31] = 0x1234;
+  const let result = native->run(state);
+  require(result && *result == 0xffffffffbfc00c30ULL && state[1] == 7 &&
+              state[31] == 0x1234,
+          "J executes its slot without writing a link");
+  const let missing =
+      mips::translate(std::span{words}.first(1), {0x1000}, arena);
+  require(!missing &&
+              missing.error().code == mips::error_code::missing_delay_slot,
+          "J requires a delay slot");
+}
+
 fn jump_and_link() -> void {
   namespace mem = jit::memory;
   constexpr std::uint64_t pc = 0xffffffffbfc00000ULL;
-  require(mips::jal_target({0x0ff004a8}, {pc}).value == 0xffffffffbfc012a0ULL &&
-              mips::jal_target({0x0c000000}, {0xffffffff8ffffffcULL}).value ==
+  require(mips::jump_target({0x0ff004a8}, {pc}).value ==
+                  0xffffffffbfc012a0ULL &&
+              mips::jump_target({0x0c000000}, {0xffffffff8ffffffcULL}).value ==
                   0xffffffff90000000ULL,
           "JAL target preserves upper PC+4 bits");
   let compiler = amd64::compiler::create();
@@ -650,7 +677,7 @@ fn jump_and_link() -> void {
     require(!missing &&
                 missing.error().code == mips::error_code::missing_delay_slot,
             "JAL requires delay slot");
-    for (const std::uint32_t nested : {0x0c000000u, 0x10000000u}) {
+    for (const std::uint32_t nested : {0x08000000u, 0x0c000000u, 0x10000000u}) {
       const std::array invalid{words[0], mips::instruction_word{nested}};
       const let rejected = mips::translate(invalid, {pc}, arena);
       require(!rejected && rejected.error().code ==
@@ -882,6 +909,7 @@ fn main(int argc, char **argv) -> int {
   mmio_console();
   example_program();
   branches_and_dispatch();
+  direct_jump();
   jump_and_link();
   instruction_fetch_faults();
   std::println(

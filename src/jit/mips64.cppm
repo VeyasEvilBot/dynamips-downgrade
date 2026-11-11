@@ -33,10 +33,10 @@ constexpr fn is_branch(instruction_word word) noexcept -> bool {
 }
 
 constexpr fn has_delay_slot(instruction_word word) noexcept -> bool {
-  return is_branch(word) || word.bits >> 26 == 3;
+  return is_branch(word) || word.bits >> 26 == 2 || word.bits >> 26 == 3;
 }
 
-constexpr fn jal_target(instruction_word word, guest_address pc) noexcept
+constexpr fn jump_target(instruction_word word, guest_address pc) noexcept
     -> guest_address {
   const std::uint64_t low = std::uint64_t{word.bits & 0x03ff'ffffu} << 2;
 
@@ -129,7 +129,7 @@ struct error {
     const bool store = opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
     const bool branch = is_branch(words[i]);
-    const bool jump = opcode == 3;
+    const bool jump = opcode == 2 || opcode == 3;
     if (!immediate && !memory_access && !branch && !jump &&
         !(opcode == 0 && (function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
@@ -162,14 +162,18 @@ struct error {
     }
     if (jump) {
       const guest_address pc{start.value + i * 4};
-      const let link = result.append(ir::node::constant(pc.value + 8, source));
-      if (!link)
-        return failed(link.error());
-      if (let written = result.append(ir::node::write({31}, *link, source));
-          !written)
-        return failed(written.error());
-      registers[31] = *link;
-      if (let exit = result.set_jump({jal_target(words[i], pc).value, source});
+      if (opcode == 3) {
+        const let link =
+            result.append(ir::node::constant(pc.value + 8, source));
+        if (!link)
+          return failed(link.error());
+        if (let written = result.append(ir::node::write({31}, *link, source));
+            !written)
+          return failed(written.error());
+        registers[31] = *link;
+      }
+      if (let exit =
+              result.set_jump({jump_target(words[i], pc).value, source});
           !exit)
         return failed(exit.error());
       continue;

@@ -283,15 +283,15 @@ fn real_rom(const char *path) -> bool {
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
   return check(
       error.code == jit::dispatch_error_code::translation &&
-          error.pc == 0xffffffffbfc00c0cULL &&
-          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x0bf0030c &&
+          error.pc == 0xffffffffbfc00c34ULL &&
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x54a2fff8 &&
           (*board)->cpu().registers[29] == 0xffffffff80003f78ULL &&
           (*board)->cpu().registers[5] == 'R' &&
           (*board)->cpu().registers[31] == 0xffffffffbfc012c0ULL &&
           (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
               0xffffffffbfc00008ULL &&
-          (*board)->cpu().pc.value == 0xffffffffbfc00c08ULL,
-      "ROM reads its first string byte and reaches a direct jump");
+          (*board)->cpu().pc.value == 0xffffffffbfc00c30ULL,
+      "ROM follows a direct jump and reaches a likely branch");
 }
 } // namespace
 
