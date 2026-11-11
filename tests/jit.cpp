@@ -60,7 +60,7 @@ fn differential() -> void {
       const let rs = static_cast<std::uint32_t>(next(seed) & 31);
       const let rt = static_cast<std::uint32_t>(next(seed) & 31);
       const let rd = static_cast<std::uint32_t>(next(seed) & 31);
-      switch (next(seed) % 3) {
+      switch (next(seed) % 4) {
       case 0: {
         const let immediate = static_cast<std::uint32_t>(next(seed) & 0xffff);
         word.bits = (0x0du << 26) | (rs << 21) | (rt << 16) | immediate;
@@ -78,6 +78,14 @@ fn differential() -> void {
         if (rd != 0)
           expected[rd] = read(rs) + read(rt);
         break;
+      case 3: {
+        const let immediate = static_cast<std::uint32_t>(next(seed) & 0xffff);
+        word.bits = (0x0fu << 26) | (rt << 16) | immediate;
+        if (rt != 0)
+          expected[rt] = static_cast<std::uint64_t>(
+              std::int64_t{std::bit_cast<std::int32_t>(immediate << 16)});
+        break;
+      }
       }
     }
     alignas(std::max_align_t) std::array<std::byte, 64 * 1024> storage;

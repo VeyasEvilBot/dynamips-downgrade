@@ -280,10 +280,10 @@ fn real_rom(const char *path) -> bool {
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
   return check(
       error.code == jit::dispatch_error_code::translation &&
-          error.pc == 0xffffffffbfc012a0ULL &&
+          error.pc == 0xffffffffbfc012a4ULL &&
           (*board)->cpu().registers[31] == 0xffffffffbfc00008ULL &&
-          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x3c05bfc0 &&
-          (*board)->cpu().pc.value == error.pc,
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x27bdffc8 &&
+          (*board)->cpu().pc.value == 0xffffffffbfc012a0ULL,
       "execute ROM JAL and report the next unimplemented instruction without "
       "claiming IOS boot");
 }

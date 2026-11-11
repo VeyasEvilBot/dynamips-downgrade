@@ -122,7 +122,8 @@ struct error {
     const let rt = static_cast<std::uint16_t>((bits >> 16) & 31);
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
     const let function = bits & 63;
-    const bool immediate = opcode == 0x0d;
+    const bool lui = opcode == 0x0f;
+    const bool immediate = opcode == 0x0d || lui;
     const bool load = opcode == 0x23 || opcode == 0x37;
     const bool store = opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
@@ -134,6 +135,8 @@ struct error {
     if (!immediate && !memory_access && !branch && !jump &&
         ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
+    if (lui && rs != 0)
+      return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = immediate || memory_access ? rt : rd;
     if (destination == 0 && !memory_access && !branch && !jump)
       continue;
@@ -144,6 +147,18 @@ struct error {
                                        : error_code::invalid_ir,
                                    i});
     };
+    if (lui) {
+      const let bits32 = static_cast<std::int32_t>((bits & 0xffffu) << 16);
+      const let value = result.append(ir::node::constant(
+          static_cast<std::uint64_t>(std::int64_t{bits32}), source));
+      if (!value)
+        return failed(value.error());
+      if (let written = result.append(ir::node::write({rt}, *value, source));
+          !written)
+        return failed(written.error());
+      registers[rt] = *value;
+      continue;
+    }
     if (jump) {
       const guest_address pc{start.value + i * 4};
       const let link = result.append(ir::node::constant(pc.value + 8, source));
