@@ -602,6 +602,47 @@ fn branches_and_dispatch() -> void {
           "reject branch in delay slot");
 }
 
+fn branch_likely() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create likely branch compiler");
+  for (unsigned different = 0; different < 2; different++) {
+    for (unsigned slot = 0; slot < 3; slot++) {
+      alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+      std::pmr::monotonic_buffer_resource arena{
+          storage.data(), storage.size(), std::pmr::null_memory_resource()};
+      const std::array words{mips::instruction_word{0x34030009},
+                             mips::instruction_word{0x54220003},
+                             mips::instruction_word{slot == 0 ? 0x34030007u
+                                                    : slot == 1 ? 0xdc830000u
+                                                                : 0x34010007u}};
+      let block = mips::translate(words, {0x1000}, arena);
+      require(block && block->branch()->annul_not_taken, "translate BNEL");
+      require(ir::optimize(*block, ir::fold_constants).has_value(),
+              "optimize BNEL");
+      let native = compiler->compile(*block, arena);
+      require(native.has_value(), "compile BNEL");
+      std::array<std::byte, mem::page_size> ram{};
+      let memory = mem::address_space::create(ram, 1);
+      require(memory.has_value(), "create likely branch memory");
+      std::array<std::uint64_t, 32> state{};
+      state[1] = 5;
+      state[2] = 5 + different;
+      state[4] = 0x9000;
+      const let result = native->run(state, **memory);
+      if (slot == 1 && different)
+        require(!result && result.error().pc == 0x1008 &&
+                    result.error().branch_pc == 0x1004 && state[3] == 9,
+                "taken likely slot faults with precise state");
+      else
+        require(result && *result == (different ? 0x1014u : 0x100cu) &&
+                    state[3] == (slot == 0 && different ? 7u : 9u) &&
+                    state[1] == (slot == 2 && different ? 7u : 5u),
+                "BNEL annuls register writes and faults only when not taken");
+    }
+  }
+}
+
 fn direct_jump() -> void {
   alignas(std::max_align_t) std::array<std::byte, 8192> storage;
   std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
@@ -909,6 +950,7 @@ fn main(int argc, char **argv) -> int {
   mmio_console();
   example_program();
   branches_and_dispatch();
+  branch_likely();
   direct_jump();
   jump_and_link();
   instruction_fetch_faults();

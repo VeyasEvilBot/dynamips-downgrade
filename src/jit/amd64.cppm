@@ -214,8 +214,17 @@ public:
                                                 &scratch);
       std::pmr::vector<std::uint8_t> observed(block.info().state_slots, 1,
                                               &scratch);
+      const let *conditional = block.branch();
+      const bool likely = conditional && conditional->annul_not_taken;
+      bool crossed_slot = false;
       for (std::size_t i = block.nodes().size(); i > 0; i--) {
         const let &node = block.nodes()[i - 1];
+        if (likely && !crossed_slot &&
+            node.source_index <= conditional->source_index) {
+          // An annulled slot cannot replace preceding architectural writes.
+          std::ranges::fill(observed, 1);
+          crossed_slot = true;
+        }
         switch (node.op) {
         case ir::opcode::read_state:
           observed[node.slot.index] = 1;
@@ -285,8 +294,26 @@ public:
                    std::numeric_limits<std::uint64_t>::max() - positive_limit;
       };
 
+      const let annulled = output.newLabel();
+      if (errors.code)
+        return failure(errors.code, block.nodes().size());
+      bool guarded_slot = false;
       for (std::size_t i = 0; i < block.nodes().size(); i++) {
         const let &node = block.nodes()[i];
+        if (likely && !guarded_slot &&
+            node.source_index > conditional->source_index) {
+          const let left = operand(conditional->left);
+          const let right = operand(conditional->right);
+          if (!left || !right)
+            return failure(!left ? left.error() : right.error(), i);
+          if (const let status = output.cmp(*left, *right))
+            return failure(status, i);
+          if (const let status = conditional->kind == ir::branch_kind::equal
+                                     ? output.jne(annulled)
+                                     : output.je(annulled))
+            return failure(status, i);
+          guarded_slot = true;
+        }
         if (node.op == ir::opcode::constant)
           continue;
         if (node.op == ir::opcode::load8_signed ||
@@ -432,6 +459,8 @@ public:
         if (status || errors.code)
           return failure(status ? status : errors.code, i);
       }
+      if (const let status = output.bind(annulled))
+        return failure(status, block.nodes().size());
       const let next_pc = output.newUInt64();
       if (errors.code)
         return failure(errors.code, block.nodes().size());

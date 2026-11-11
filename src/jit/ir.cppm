@@ -172,6 +172,7 @@ struct branch_exit {
   std::uint64_t target;
   std::uint32_t source_index;
   branch_kind kind;
+  bool annul_not_taken = false;
 };
 
 struct jump_exit {
@@ -301,6 +302,15 @@ public:
           (exit.kind != branch_kind::equal &&
            exit.kind != branch_kind::not_equal))
         return std::unexpected(error{error_code::invalid_metadata, 0});
+      if (exit.annul_not_taken) {
+        bool in_slot = false;
+        for (const let &value : nodes_) {
+          if (value.source_index > exit.source_index)
+            in_slot = true;
+          else if (in_slot)
+            return std::unexpected(error{error_code::invalid_metadata, 0});
+        }
+      }
       for (const let input : {exit.left, exit.right})
         if (input.index >= nodes_.size() ||
             !produces_value(nodes_[input.index].op) ||
@@ -456,11 +466,11 @@ private:
       return std::format_to(
           out,
           "  br.{} %v{}, %v{}, {:#x}, {:#x} ; branch PC={:#x}, delay slot "
-          "included\n}}",
+          "{}\n}}",
           branch()->kind == branch_kind::equal ? "eq" : "ne",
           branch()->left.index, branch()->right.index, branch()->target,
-          next_pc(),
-          info_.start_pc + std::uint64_t{branch()->source_index} * 4);
+          next_pc(), info_.start_pc + std::uint64_t{branch()->source_index} * 4,
+          branch()->annul_not_taken ? "annulled when not taken" : "included");
     return std::format_to(out, "  ret i64 {}\n}}", next_pc());
   }
 };
