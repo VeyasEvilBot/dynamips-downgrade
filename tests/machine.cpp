@@ -287,6 +287,9 @@ fn rom_service_queues() -> bool {
              "map ROM service registers"))
     return false;
   let &guest = **memory;
+  if (!check(guest.load<std::uint32_t>({0x8000}) == 0x1e94b3df,
+             "ROM identification register matches the real firmware"))
+    return false;
   if (!check(!guest.store<std::uint8_t>({0x8040}, 'R') &&
                  !guest.store<std::uint32_t>({0x8044}, 1) &&
                  !guest.load<std::uint32_t>({0x8040}),
@@ -357,7 +360,8 @@ fn real_rom(const char *path) -> bool {
   if (!check(rom_image.has_value(), "load bundled real MIPS ROM"))
     return false;
   using dynamips::devices::rom_output;
-  dynamips::devices::rom_services services{{0x16000000}};
+  dynamips::devices::rom_services services{{0x16000000},
+                                           {{0xffffffffbe000000ULL}}};
   const std::array attachments{machine::attachment{
       dynamips::c7200::rom_services, services.descriptor()}};
   let board = machine::instance::create(dynamips::c7200::npe400, *rom_image,
@@ -400,9 +404,9 @@ fn real_rom(const char *path) -> bool {
     return false;
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
   return check(
-      error.code == jit::dispatch_error_code::memory &&
-          error.pc == 0xffffffffbfc012d8ULL &&
-          error.access.address.value == 0xffffffffb6000000ULL &&
+      error.code == jit::dispatch_error_code::translation &&
+          error.pc == 0xffffffffbfc00b30ULL &&
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0xa0660000 &&
           (*board)->cpu().registers[29] == 0xffffffff80003fc8ULL &&
           (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
               0xffffffffbfc00008ULL &&

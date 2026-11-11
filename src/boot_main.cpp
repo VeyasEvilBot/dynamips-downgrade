@@ -101,7 +101,8 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
       return 1;
     ios.emplace(std::move(*loaded));
   }
-  dynamips::devices::rom_services services{{0x16000000}};
+  dynamips::devices::rom_services services{{0x16000000},
+                                           {{0xffffffffbe000000ULL}}};
   const std::array attachments{machine::attachment{
       dynamips::c7200::rom_services, services.descriptor()}};
   let board = machine::instance::create(dynamips::c7200::npe400, *rom,

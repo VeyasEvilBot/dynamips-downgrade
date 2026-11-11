@@ -16,6 +16,10 @@ import jit.fifo;
 import jit.memory;
 
 export namespace dynamips::devices {
+struct rom_boot_info {
+  jit::memory::virtual_address nvram;
+};
+
 enum class rom_output : std::uint8_t { console, log };
 
 // Console +0x40 and ROM log +0x3c accept the low byte of big-endian words.
@@ -24,8 +28,9 @@ class rom_services {
 public:
   static constexpr std::size_t capacity = 1024;
 
-  explicit rom_services(jit::memory::physical_address base) noexcept
-      : base_(base), endpoint_{this, nullptr, write} {}
+  explicit rom_services(jit::memory::physical_address base,
+                        rom_boot_info boot = {}) noexcept
+      : base_(base), boot_(boot), endpoint_{this, read, write} {}
 
   rom_services(const rom_services &) = delete;
   fn operator=(const rom_services &) -> rom_services & = delete;
@@ -49,11 +54,34 @@ public:
 
 private:
   jit::memory::physical_address base_;
+  rom_boot_info boot_;
   std::array<jit::byte_fifo<capacity>, 2> queues_{};
   jit::memory::device endpoint_;
 
   fn queue(rom_output channel) noexcept -> jit::byte_fifo<capacity> & {
     return channel == rom_output::console ? queues_[0] : queues_[1];
+  }
+
+  static fn read(void *context, jit::memory::device_access access) noexcept
+      -> std::expected<std::uint64_t, jit::memory::device_error> {
+    namespace mem = jit::memory;
+    let &self = *static_cast<rom_services *>(context);
+    if (access.size != mem::access_size::word)
+      return std::unexpected(mem::device_error::unsupported_size);
+    if (access.address.value < self.base_.value)
+      return std::unexpected(mem::device_error::bus);
+    std::uint32_t value;
+    switch (access.address.value - self.base_.value) {
+    case 0:
+      value = 0x1e94b3df;
+      break;
+    case 0x44:
+      value = static_cast<std::uint32_t>(self.boot_.nvram.value);
+      break;
+    default:
+      return std::unexpected(mem::device_error::bus);
+    }
+    return access.order == std::endian::little ? std::byteswap(value) : value;
   }
 
   static fn write(void *context, jit::memory::device_access access,
