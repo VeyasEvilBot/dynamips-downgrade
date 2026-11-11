@@ -29,7 +29,7 @@ struct guest_address {
 
 constexpr fn is_branch(instruction_word word) noexcept -> bool {
   const let op = word.bits >> 26;
-  return op == 4 || op == 5 || op == 0x15;
+  return op == 4 || op == 5 || op == 0x14 || op == 0x15;
 }
 
 constexpr fn has_delay_slot(instruction_word word) noexcept -> bool {
@@ -210,11 +210,11 @@ struct error {
           std::int64_t{static_cast<std::int16_t>(bits & 0xffff)} * 4;
       const let target =
           start.value + i * 4 + 4 + static_cast<std::uint64_t>(displacement);
-      if (let exit =
-              result.set_branch({*left, *right, target, source,
-                                 opcode == 4 ? ir::branch_kind::equal
+      if (let exit = result.set_branch({*left, *right, target, source,
+                                         (opcode == 4 || opcode == 0x14)
+                                             ? ir::branch_kind::equal
                                              : ir::branch_kind::not_equal,
-                                 opcode == 0x15});
+                                         opcode == 0x14 || opcode == 0x15});
           !exit)
         return failed(exit.error());
       continue;

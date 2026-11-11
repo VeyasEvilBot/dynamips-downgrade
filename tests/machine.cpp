@@ -400,9 +400,9 @@ fn real_rom(const char *path) -> bool {
     return false;
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
   return check(
-      error.code == jit::dispatch_error_code::translation &&
-          error.pc == 0xffffffffbfc012e0ULL &&
-          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x50620009 &&
+      error.code == jit::dispatch_error_code::memory &&
+          error.pc == 0xffffffffbfc012d8ULL &&
+          error.access.address.value == 0xffffffffb6000000ULL &&
           (*board)->cpu().registers[29] == 0xffffffff80003fc8ULL &&
           (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
               0xffffffffbfc00008ULL &&
