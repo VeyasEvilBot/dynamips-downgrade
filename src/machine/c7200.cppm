@@ -18,6 +18,7 @@ inline constexpr std::array windows{
 
 export inline constexpr machine::window_id gt64120{0};
 export inline constexpr machine::window_id rom_services{1};
+export inline constexpr machine::window_id nvram{3};
 export inline constexpr machine::window_id io_fpga{5};
 
 export inline constexpr machine::definition npe400{

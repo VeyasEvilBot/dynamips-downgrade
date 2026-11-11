@@ -19,6 +19,7 @@
 
 #include <dynamips/macros.h>
 
+import devices.byte_memory;
 import devices.rom_services;
 import machine.firmware;
 import machine.core;
@@ -269,6 +270,34 @@ fn composition() -> bool {
   return true;
 }
 
+fn byte_memory_contract() -> bool {
+  std::array<std::byte, 16> bytes{};
+  dynamips::devices::byte_memory device{{0x100000}, bytes};
+  let descriptor = device.descriptor();
+  let &endpoint = *descriptor.endpoint;
+  const mem::device_access word{
+      {0x100004}, std::endian::big, mem::access_size::word};
+  if (!check(endpoint.write(endpoint.context, word, 0x12345678).has_value() &&
+                 endpoint.read(endpoint.context, word) == 0x12345678 &&
+                 bytes[4] == std::byte{0x12} && bytes[7] == std::byte{0x78},
+             "byte memory stores big-endian words"))
+    return false;
+  const mem::device_access little{
+      {0x100004}, std::endian::little, mem::access_size::word};
+  if (!check(endpoint.read(endpoint.context, little) == 0x78563412 &&
+                 !endpoint.write(
+                     endpoint.context,
+                     {{0x100010}, std::endian::big, mem::access_size::byte}, 1),
+             "byte memory respects access order and backing bounds"))
+    return false;
+  jit::devices::bus bus;
+  if (!check(bus.add({{0x100000}, bytes.size()}, descriptor).has_value(),
+             "register byte memory"))
+    return false;
+  bus.reset();
+  return check(bytes[4] == std::byte{0x12}, "warm reset retains NVRAM bytes");
+}
+
 fn rom_service_queues() -> bool {
   using dynamips::devices::rom_output;
   dynamips::devices::rom_services device{{0x16000000}};
@@ -362,8 +391,11 @@ fn real_rom(const char *path) -> bool {
   using dynamips::devices::rom_output;
   dynamips::devices::rom_services services{{0x16000000},
                                            {{0xffffffffbe000000ULL}}};
-  const std::array attachments{machine::attachment{
-      dynamips::c7200::rom_services, services.descriptor()}};
+  std::array<std::byte, 128 * 1024> nvram_bytes{};
+  dynamips::devices::byte_memory nvram{{0x1e000000}, nvram_bytes};
+  const std::array attachments{
+      machine::attachment{dynamips::c7200::rom_services, services.descriptor()},
+      machine::attachment{dynamips::c7200::nvram, nvram.descriptor()}};
   let board = machine::instance::create(dynamips::c7200::npe400, *rom_image,
                                          nullptr, attachments);
   if (!check(board.has_value(), "prepare full-size C7200 NPE-400 memory map"))
@@ -404,10 +436,10 @@ fn real_rom(const char *path) -> bool {
     return false;
   const let &error = std::get<jit::dispatch_error>(boot.error().cause);
   return check(
-      error.code == jit::dispatch_error_code::memory &&
-          error.pc == 0xffffffffbfc00b30ULL &&
-          error.access.address.value == 0xffffffffbe000080ULL &&
-          (*board)->cpu().registers[29] == 0xffffffff80003fc8ULL &&
+      error.code == jit::dispatch_error_code::translation &&
+          error.pc == 0xffffffffbfc00624ULL &&
+          (*board)->memory().fetch<std::uint32_t>({error.pc}) == 0x40844800 &&
+          (*board)->cpu().registers[29] == 0xffffffff80003fa0ULL &&
           (*board)->memory().load<std::uint64_t>({0xffffffff80003ff8ULL}) ==
               0xffffffffbfc00008ULL &&
           std::string_view{output[0].data(), written[0]} ==
@@ -422,8 +454,8 @@ fn main(int argc, char **argv) -> int {
   try {
     if (argc != 2)
       return 1;
-    if (!rom_contract() || !composition() || !rom_service_queues() ||
-        !real_rom(argv[1]))
+    if (!rom_contract() || !composition() || !byte_memory_contract() ||
+        !rom_service_queues() || !real_rom(argv[1]))
       return 1;
     std::println("machine: ELF loading, chassis composition, ROM protection, "
                  "reset and real C7200 boot boundary passed");
