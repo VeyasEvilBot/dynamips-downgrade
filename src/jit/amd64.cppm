@@ -261,6 +261,7 @@ public:
           break;
         case ir::opcode::constant:
         case ir::opcode::sign_extend32:
+        case ir::opcode::signed_less:
         case ir::opcode::add_wrap:
         case ir::opcode::bit_and:
         case ir::opcode::bit_or:
@@ -482,6 +483,26 @@ public:
           status = output.mov(result,
                               asmjit::x86::Mem{state, node.slot.index * 8, 8});
           break;
+        case ir::opcode::signed_less: {
+          const let left = operand(node.data.inputs.left);
+          if (!left)
+            return failure(left.error(), i);
+          if (const let emitted = output.mov(result, 0))
+            return failure(emitted, i);
+          const let right = node.data.inputs.right;
+          if (immediate(right)) {
+            status = output.cmp(
+                *left, asmjit::Imm{block.nodes()[right.index].data.immediate});
+          } else {
+            const let value = operand(right);
+            if (!value)
+              return failure(value.error(), i);
+            status = output.cmp(*left, *value);
+          }
+          if (!status)
+            status = output.setl(result.r8());
+          break;
+        }
         case ir::opcode::add_wrap:
         case ir::opcode::bit_and:
         case ir::opcode::bit_or:
