@@ -669,7 +669,8 @@ private:
     case opcode::cache_index:
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
-      if ((current.slot.index > 1 && current.slot.index != 11) ||
+      if ((current.slot.index > 1 && current.slot.index != 11 &&
+           current.slot.index != 22) ||
           !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
@@ -820,9 +821,10 @@ private:
       case opcode::cache_index:
         out =
             std::format_to(out, "  cache.index.{} %v{}",
-                           current.slot.index == 0   ? "invalidate.i"
-                           : current.slot.index == 1 ? "writeback.invalidate.d"
-                                                     : "store.tag.s",
+                           current.slot.index == 0    ? "invalidate.i"
+                           : current.slot.index == 1  ? "writeback.invalidate.d"
+                           : current.slot.index == 11 ? "store.tag.s"
+                                                      : "page.invalidate.t",
                            current.data.inputs.left.index);
         break;
       case opcode::exception_return:
