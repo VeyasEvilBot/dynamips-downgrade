@@ -1685,6 +1685,13 @@ fn hilo_arithmetic() -> void {
       sample{0xffffffff, 2, 1, 0xfffffffffffffffeULL},
       sample{0x80000000, 2, 1, 0},
       sample{0x1234567800000003ULL, 0xfedcba9800000007ULL, 0, 21}};
+  constexpr std::array signed_division{
+      sample{7, 3, 1, 2},
+      sample{0xfffffff9, 3, UINT64_MAX, 0xfffffffffffffffeULL},
+      sample{7, 0xfffffffd, 1, 0xfffffffffffffffeULL},
+      sample{0x80000000, 0xffffffff, 0, 0xffffffff80000000ULL},
+      sample{0x80000000, 1, 0, 0xffffffff80000000ULL},
+      sample{7, 0, 0xaabb, 0xccdd}};
   constexpr std::array division{
       sample{0xffffffff, 2, 1, 0x7fffffff},
       sample{0x80000000, 1, 0, 0xffffffff80000000ULL},
@@ -1698,7 +1705,7 @@ fn hilo_arithmetic() -> void {
   std::array<std::byte, mem::page_size> ram{};
   let memory = mem::address_space::create(ram, 1);
   require(memory.has_value(), "create HI/LO arithmetic memory");
-  for (const std::uint32_t function : {0x18u, 0x19u, 0x1bu}) {
+  for (const std::uint32_t function : {0x18u, 0x19u, 0x1au, 0x1bu}) {
     alignas(std::max_align_t) std::array<std::byte, 16384> storage;
     std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                               std::pmr::null_memory_resource()};
@@ -1713,6 +1720,7 @@ fn hilo_arithmetic() -> void {
     const std::span<const sample> samples =
         function == 0x18   ? std::span<const sample>{multiplication}
         : function == 0x19 ? std::span<const sample>{unsigned_multiplication}
+        : function == 0x1a ? std::span<const sample>{signed_division}
                            : std::span<const sample>{division};
     for (const let &test : samples) {
       std::array<std::uint64_t, 32> state{};
