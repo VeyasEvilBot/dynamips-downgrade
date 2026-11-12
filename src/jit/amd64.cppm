@@ -183,6 +183,23 @@ private:
     return *result;
   }
 
+  template <bool Right>
+  static fn load_merge64(execution_context *context, std::uint64_t address,
+                          std::uint64_t previous) noexcept -> std::uint64_t {
+    const let loaded =
+        load<std::uint64_t>(context, address & ~std::uint64_t{7});
+    if (context->failed) {
+      context->fault.address.value = address;
+      return 0;
+    }
+    const let byte = static_cast<unsigned>(address & 7);
+    const let shift = (Right ? 7 - byte : byte) * 8;
+    if constexpr (Right)
+      return (previous & ~(UINT64_MAX >> shift)) | (loaded >> shift);
+    else
+      return (previous & ~(UINT64_MAX << shift)) | (loaded << shift);
+  }
+
   template <std::unsigned_integral T>
   static fn store(execution_context *context, std::uint64_t address,
                    std::uint64_t value) noexcept -> void {
@@ -517,6 +534,35 @@ public:
         }
         if (node.op == ir::opcode::constant)
           continue;
+        if (node.op == ir::opcode::load64_left ||
+            node.op == ir::opcode::load64_right) {
+          uses_memory = true;
+          const let address = operand(node.data.inputs.left);
+          const let previous = operand(node.data.inputs.right);
+          if (!address || !previous)
+            return failure(!address ? address.error() : previous.error(), i);
+          const let result = output.newUInt64();
+          if (errors.code)
+            return failure(errors.code, i);
+          const let target = node.op == ir::opcode::load64_left
+                                 ? &compiled_block::load_merge64<false>
+                                 : &compiled_block::load_merge64<true>;
+          asmjit::InvokeNode *call = nullptr;
+          if (const let status = output.invoke(
+                  &call, asmjit::Imm{target},
+                  asmjit::FuncSignature::build<
+                      std::uint64_t, compiled_block::execution_context *,
+                      std::uint64_t, std::uint64_t>()))
+            return failure(status, i);
+          call->setArg(0, context);
+          call->setArg(1, *address);
+          call->setArg(2, *previous);
+          call->setRet(0, result);
+          values[i] = result;
+          if (const let emitted = check_memory(node))
+            return failure(emitted, i);
+          continue;
+        }
         if (node.op == ir::opcode::load16_signed ||
             node.op == ir::opcode::load16_unsigned ||
             node.op == ir::opcode::store16 ||
@@ -929,6 +975,8 @@ public:
         case ir::opcode::load8_unsigned:
         case ir::opcode::load8_signed:
         case ir::opcode::load32_signed:
+        case ir::opcode::load64_left:
+        case ir::opcode::load64_right:
         case ir::opcode::load64:
         case ir::opcode::store16:
         case ir::opcode::store8:

@@ -1386,6 +1386,82 @@ fn memory_barriers() -> void {
           "guest stores complete before loads across SYNC");
 }
 
+fn merged_doubleword_loads() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create merged-load compiler");
+  std::array<std::byte, 2 * mem::page_size> ram{};
+  for (std::size_t i = 0; i < ram.size(); i++)
+    ram[i] = static_cast<std::byte>(i & 255);
+  let memory = mem::address_space::create(ram, 2);
+  require(
+      memory &&
+          (*memory)->map_ram({0x1000}, {0}, mem::permission::read).has_value(),
+      "map merged-load source");
+  for (const bool right : {false, true}) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{
+        mips::instruction_word{right ? 0x6c220000u : 0x68220000u}};
+    let block = mips::translate(words, {0x8000}, arena);
+    require(block.has_value(), "translate LDL/LDR");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile LDL/LDR");
+    for (unsigned offset = 0; offset < 8; offset++) {
+      std::array<std::uint64_t, 32> registers{};
+      registers[1] = 0x1000 + offset;
+      registers[2] = 0x8899aabbccddeeffULL;
+      std::array<unsigned, 8> expected{0x88, 0x99, 0xaa, 0xbb,
+                                       0xcc, 0xdd, 0xee, 0xff};
+      if (right) {
+        for (unsigned i = 0; i <= offset; i++)
+          expected[7 - offset + i] = i;
+      } else {
+        for (unsigned i = offset; i < 8; i++)
+          expected[i - offset] = i;
+      }
+      std::uint64_t value = 0;
+      for (const let byte : expected)
+        value = (value << 8) | byte;
+      require(native->run(registers, **memory).has_value() &&
+                  registers[2] == value,
+              "LDL/LDR merge every byte offset and preserve untouched register "
+              "bytes");
+    }
+    std::array<std::uint64_t, 32> registers{};
+    registers[1] = 0x3003;
+    registers[2] = 99;
+    const let fault = native->run(registers, **memory);
+    require(!fault && fault.error().pc == 0x8000 &&
+                fault.error().access.address.value == 0x3003 &&
+                registers[2] == 99,
+            "merged-load fault retains original address and destination");
+  }
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  const std::array pair{mips::instruction_word{0x68220000},
+                        mips::instruction_word{0x6c220007}};
+  let block = mips::translate(pair, {0x8000}, arena);
+  require(block.has_value(), "translate paired unaligned load");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile paired unaligned load");
+  std::array<std::uint64_t, 32> registers{};
+  registers[1] = 0x1ffd;
+  const let fault = native->run(registers, **memory);
+  require(!fault && fault.error().pc == 0x8004 &&
+              registers[2] == 0xfdfeff0000000000ULL,
+          "faulting second merge preserves completed first merge");
+  require((*memory)
+              ->map_ram({0x2000}, {mem::page_size}, mem::permission::read)
+              .has_value(),
+          "map second source page");
+  require(native->run(registers, **memory).has_value() &&
+              registers[2] == 0xfdfeff0001020304ULL,
+          "LDL/LDR pair joins bytes across a page boundary");
+}
+
 fn indexed_cache_maintenance() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -2321,6 +2397,7 @@ fn main(int argc, char **argv) -> int {
   architectural_tlb();
   prefetch_hints();
   memory_barriers();
+  merged_doubleword_loads();
   indexed_cache_maintenance();
   hilo_arithmetic();
   hilo_transfers();
