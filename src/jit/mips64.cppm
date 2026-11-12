@@ -288,7 +288,7 @@ struct error {
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (sync && (bits & 0xfffff83fu) != 0x0000000fu)
       return std::unexpected(error{error_code::invalid_encoding, i});
-    if (cache && rt > 1)
+    if (cache && rt > 1 && rt != 11)
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (hilo_arithmetic && (rd != 0 || ((bits >> 6) & 31) != 0))
       return std::unexpected(error{error_code::invalid_encoding, i});
@@ -298,7 +298,7 @@ struct error {
         ((bits & 0x7ff) != 0 ||
          (rd != 9 && rd != 11 && rd != 12 && rd != 13 && rd != 15 && rd != 16 &&
           rd != 7 && rd != 8 && rd != 14 && rd != 30 && rd != 0 && rd != 2 &&
-          rd != 3 && rd != 5 && rd != 6 && rd != 10)))
+          rd != 3 && rd != 5 && rd != 6 && rd != 10 && rd != 28 && rd != 29)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (indirect && (rt != 0 || (function == 8 && rd != 0) ||
                      (function == 9 && rd == rs) || ((bits >> 6) & 31) != 0))

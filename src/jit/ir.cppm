@@ -669,7 +669,8 @@ private:
     case opcode::cache_index:
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
-      if (current.slot.index > 1 || !operand_valid(current.data.inputs.left))
+      if ((current.slot.index > 1 && current.slot.index != 11) ||
+          !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
     case opcode::memory_barrier:
@@ -704,7 +705,8 @@ private:
           current.slot.index != 3 && current.slot.index != 5 &&
           current.slot.index != 6 && current.slot.index != 10 &&
           current.slot.index != 7 && current.slot.index != 8 &&
-          current.slot.index != 14 && current.slot.index != 30)
+          current.slot.index != 14 && current.slot.index != 30 &&
+          current.slot.index != 28 && current.slot.index != 29)
         return fail(error_code::invalid_slot);
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
@@ -816,10 +818,12 @@ private:
         out = std::format_to(out, "  fence memory");
         break;
       case opcode::cache_index:
-        out = std::format_to(out, "  cache.index.{} %v{}",
-                             current.slot.index == 0 ? "invalidate.i"
-                                                     : "writeback.invalidate.d",
-                             current.data.inputs.left.index);
+        out =
+            std::format_to(out, "  cache.index.{} %v{}",
+                           current.slot.index == 0   ? "invalidate.i"
+                           : current.slot.index == 1 ? "writeback.invalidate.d"
+                                                     : "store.tag.s",
+                           current.data.inputs.left.index);
         break;
       case opcode::exception_return:
         out = std::format_to(out, "  return.exception");

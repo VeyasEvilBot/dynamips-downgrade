@@ -747,7 +747,7 @@ fn cop0_writes() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create CP0 compiler");
-  for (const unsigned slot : {7u, 9u, 11u, 12u, 13u, 15u, 16u}) {
+  for (const unsigned slot : {7u, 9u, 11u, 12u, 13u, 15u, 16u, 28u, 29u}) {
     alignas(std::max_align_t) std::array<std::byte, 8192> storage;
     std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                               std::pmr::null_memory_resource()};
@@ -1390,7 +1390,7 @@ fn indexed_cache_maintenance() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create cache maintenance compiler");
-  for (const std::uint32_t operation : {0u, 1u}) {
+  for (const std::uint32_t operation : {0u, 1u, 11u}) {
     alignas(std::max_align_t) std::array<std::byte, 8192> storage;
     std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                               std::pmr::null_memory_resource()};
