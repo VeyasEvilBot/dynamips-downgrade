@@ -183,6 +183,39 @@ fn rom_contract() -> bool {
       "ROM is executable but cannot gain write permission through an alias");
 }
 
+fn empty_port_adapters() -> bool {
+  dynamips::devices::c7200_midplane midplane;
+  let &endpoint = *midplane.descriptor().endpoint;
+  const let access = [](std::uint64_t offset) {
+    return mem::device_access{
+        {0x1e800000 + offset}, std::endian::big, mem::access_size::word};
+  };
+  if (!check(endpoint.write(endpoint.context, access(0x60), 0x02020202)
+                     .has_value() &&
+                 endpoint.read(endpoint.context, access(0x60)) == 0x42424242 &&
+                 endpoint.read(endpoint.context, access(0x68)) == 3 &&
+                 endpoint.write(endpoint.context, access(0x68), 0x203)
+                     .has_value() &&
+                 endpoint.read(endpoint.context, access(0x68)) == 0x4203 &&
+                 endpoint.read(endpoint.context, access(0x50)) == 6,
+             "empty adapter bays expose pulled-high EEPROM lines and I/O-slot "
+             "power"))
+    return false;
+  if (!check(endpoint.write(endpoint.context, access(0x20), 0xffffffff)
+                     .has_value() &&
+                 endpoint.read(endpoint.context, access(0x20)) == 0xffffffff &&
+                 endpoint.read(endpoint.context, access(0x10)) == 0 &&
+                 !endpoint.write(endpoint.context, access(0x68), 0),
+             "adapter masks retain state without fabricating interrupts; "
+             "unsupported shutdown faults"))
+    return false;
+  midplane.reset();
+  return check(endpoint.read(endpoint.context, access(0x60)) == 0 &&
+                   endpoint.read(endpoint.context, access(0x68)) == 3 &&
+                   endpoint.read(endpoint.context, access(0x20)) == 0,
+               "midplane reset restores EEPROM pins and interrupt masks");
+}
+
 fn serial_board_identity() -> bool {
   dynamips::devices::c7200_iofpga io{dynamips::c7200::npe400_eeprom,
                                      dynamips::c7200::vxr_eeprom};
@@ -927,6 +960,8 @@ fn main(int argc, char **argv) -> int {
                      probe.context,
                      {{0x1e8403a2}, std::endian::big, mem::access_size::half}),
              "NPE-400 board probe reads zero; unknown registers fault"))
+    return 1;
+  if (!empty_port_adapters())
     return 1;
   if (!serial_board_identity())
     return 1;
