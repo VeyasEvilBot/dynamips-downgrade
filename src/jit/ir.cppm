@@ -81,6 +81,8 @@ enum class opcode : std::uint8_t {
   load16_unsigned,
   load32_signed,
   load64,
+  load32_left,
+  load32_right,
   load64_left,
   load64_right,
   store8,
@@ -438,6 +440,16 @@ struct node {
             source,
             {},
             right ? opcode::load64_right : opcode::load64_left,
+            width::bits64};
+  }
+
+  static constexpr fn load_merge32(value_id address, value_id previous,
+                                    bool right, std::uint32_t source) noexcept
+      -> node {
+    return {{.inputs = {address, previous}},
+            source,
+            {},
+            right ? opcode::load32_right : opcode::load32_left,
             width::bits64};
   }
 
@@ -840,6 +852,8 @@ private:
     case opcode::load8_signed:
     case opcode::load32_signed:
     case opcode::load64:
+    case opcode::load32_left:
+    case opcode::load32_right:
     case opcode::load64_left:
     case opcode::load64_right:
     case opcode::store16:
@@ -850,7 +864,9 @@ private:
         return fail(error_code::invalid_type);
       if (!operand_valid(current.data.inputs.left) ||
           ((!produces_value(current.op) || current.op == opcode::load64_left ||
-            current.op == opcode::load64_right) &&
+            current.op == opcode::load64_right ||
+            current.op == opcode::load32_left ||
+            current.op == opcode::load32_right) &&
            !operand_valid(current.data.inputs.right)))
         return fail(error_code::invalid_operand);
       break;
@@ -968,11 +984,20 @@ private:
             std::format_to(out, "  state.write i64 %v{}, %state, {}",
                            current.data.inputs.left.index, current.slot.index);
         break;
+      case opcode::load32_left:
+      case opcode::load32_right:
       case opcode::load64_left:
       case opcode::load64_right:
         out = std::format_to(
-            out, "  %v{} = load.guest.merge.{} i64 %v{}, %v{}", i,
-            current.op == opcode::load64_left ? "left" : "right",
+            out, "  %v{} = load.guest.merge.{} i{} %v{}, %v{}", i,
+            current.op == opcode::load64_left ||
+                    current.op == opcode::load32_left
+                ? "left"
+                : "right",
+            current.op == opcode::load32_left ||
+                    current.op == opcode::load32_right
+                ? 32
+                : 64,
             current.data.inputs.left.index, current.data.inputs.right.index);
         break;
       case opcode::load16_signed:

@@ -193,21 +193,26 @@ private:
     return *result;
   }
 
-  template <bool Right>
-  static fn load_merge64(execution_context *context, std::uint64_t address,
-                          std::uint64_t previous) noexcept -> std::uint64_t {
-    const let loaded =
-        load<std::uint64_t>(context, address & ~std::uint64_t{7});
+  template <std::unsigned_integral T, bool Right>
+  static fn load_merge(execution_context *context, std::uint64_t address,
+                        std::uint64_t previous) noexcept -> std::uint64_t {
+    const T loaded = static_cast<T>(
+        load<T>(context, address & ~std::uint64_t{sizeof(T) - 1}));
     if (context->failed) {
       context->fault.address.value = address;
       return 0;
     }
-    const let byte = static_cast<unsigned>(address & 7);
-    const let shift = (Right ? 7 - byte : byte) * 8;
-    if constexpr (Right)
-      return (previous & ~(UINT64_MAX >> shift)) | (loaded >> shift);
-    else
-      return (previous & ~(UINT64_MAX << shift)) | (loaded << shift);
+    const let byte = static_cast<unsigned>(address & (sizeof(T) - 1));
+    const let shift = (Right ? sizeof(T) - 1 - byte : byte) * 8;
+    constexpr T mask = std::numeric_limits<T>::max();
+    const T result =
+        Right
+            ? (static_cast<T>(previous) & ~(mask >> shift)) | (loaded >> shift)
+            : (static_cast<T>(previous) & ~(mask << shift)) | (loaded << shift);
+    if constexpr (sizeof(T) == 4)
+      return static_cast<std::uint64_t>(
+          std::int64_t{std::bit_cast<std::int32_t>(result)});
+    return result;
   }
 
   template <std::unsigned_integral T>
@@ -556,7 +561,9 @@ public:
         }
         if (node.op == ir::opcode::constant)
           continue;
-        if (node.op == ir::opcode::load64_left ||
+        if (node.op == ir::opcode::load32_left ||
+            node.op == ir::opcode::load32_right ||
+            node.op == ir::opcode::load64_left ||
             node.op == ir::opcode::load64_right) {
           uses_memory = true;
           const let address = operand(node.data.inputs.left);
@@ -566,9 +573,14 @@ public:
           const let result = output.newUInt64();
           if (errors.code)
             return failure(errors.code, i);
-          const let target = node.op == ir::opcode::load64_left
-                                 ? &compiled_block::load_merge64<false>
-                                 : &compiled_block::load_merge64<true>;
+          const let target =
+              node.op == ir::opcode::load64_left
+                  ? &compiled_block::load_merge<std::uint64_t, false>
+              : node.op == ir::opcode::load64_right
+                  ? &compiled_block::load_merge<std::uint64_t, true>
+              : node.op == ir::opcode::load32_left
+                  ? &compiled_block::load_merge<std::uint32_t, false>
+                  : &compiled_block::load_merge<std::uint32_t, true>;
           asmjit::InvokeNode *call = nullptr;
           if (const let status = output.invoke(
                   &call, asmjit::Imm{target},
@@ -1036,6 +1048,8 @@ public:
         case ir::opcode::load8_unsigned:
         case ir::opcode::load8_signed:
         case ir::opcode::load32_signed:
+        case ir::opcode::load32_left:
+        case ir::opcode::load32_right:
         case ir::opcode::load64_left:
         case ir::opcode::load64_right:
         case ir::opcode::load64:

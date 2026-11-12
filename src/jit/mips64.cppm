@@ -244,7 +244,8 @@ struct error {
       2 * static_cast<std::size_t>(
               std::ranges::count_if(words, [](instruction_word word) {
                 return (word.bits >> 26 == 0 && (word.bits & 63) == 0x27) ||
-                       word.bits >> 26 == 0x1a || word.bits >> 26 == 0x1b;
+                       word.bits >> 26 == 0x1a || word.bits >> 26 == 0x1b ||
+                       word.bits >> 26 == 0x22 || word.bits >> 26 == 0x26;
               }));
   if (extra_nodes > std::numeric_limits<std::uint32_t>::max() ||
       words.size() > (std::numeric_limits<std::uint32_t>::max() - extra_nodes) /
@@ -314,7 +315,8 @@ struct error {
     const bool addiu = opcode == 0x09;
     const bool immediate = opcode == 0x0c || opcode == 0x0d || opcode == 0x0e ||
                            lui || addi || addiu || daddiu || slti || sltiu;
-    const bool merge_load = opcode == 0x1a || opcode == 0x1b;
+    const bool merge_load =
+        opcode == 0x1a || opcode == 0x1b || opcode == 0x22 || opcode == 0x26;
     const bool load = merge_load || opcode == 0x21 || opcode == 0x25 ||
                       opcode == 0x20 || opcode == 0x24 || opcode == 0x23 ||
                       opcode == 0x37;
@@ -665,8 +667,12 @@ struct error {
         const let previous = read(rt);
         if (!previous)
           return failed(previous.error());
-        const let value = result.append(ir::node::load_merge64(
-            *address, *previous, opcode == 0x1b, source));
+        const let value =
+            result.append((opcode == 0x22 || opcode == 0x26)
+                              ? ir::node::load_merge32(*address, *previous,
+                                                       opcode == 0x26, source)
+                              : ir::node::load_merge64(*address, *previous,
+                                                       opcode == 0x1b, source));
         if (!value)
           return failed(value.error());
         if (rt != 0) {

@@ -1525,8 +1525,9 @@ fn cop1_transfers() -> void {
   }
 }
 
-fn merged_doubleword_loads() -> void {
+template <bool Word> fn merged_loads() -> void {
   namespace mem = jit::memory;
+  constexpr unsigned size = Word ? 4 : 8;
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create merged-load compiler");
   std::array<std::byte, 2 * mem::page_size> ram{};
@@ -1542,30 +1543,36 @@ fn merged_doubleword_loads() -> void {
     std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                               std::pmr::null_memory_resource()};
     const std::array words{
-        mips::instruction_word{right ? 0x6c220000u : 0x68220000u}};
+        mips::instruction_word{Word ? (right ? 0x98220000u : 0x88220000u)
+                                    : (right ? 0x6c220000u : 0x68220000u)}};
     let block = mips::translate(words, {0x8000}, arena);
-    require(block.has_value(), "translate LDL/LDR");
+    require(block.has_value(), "translate word/doubleword merge loads");
     let native = compiler->compile(*block, arena);
-    require(native.has_value(), "compile LDL/LDR");
-    for (unsigned offset = 0; offset < 8; offset++) {
+    require(native.has_value(), "compile word/doubleword merge loads");
+    for (unsigned offset = 0; offset < size; offset++) {
       std::array<std::uint64_t, 32> registers{};
       registers[1] = 0x1000 + offset;
       registers[2] = 0x8899aabbccddeeffULL;
-      std::array<unsigned, 8> expected{0x88, 0x99, 0xaa, 0xbb,
-                                       0xcc, 0xdd, 0xee, 0xff};
+      std::array<unsigned, 8> expected_bytes{0x88, 0x99, 0xaa, 0xbb,
+                                             0xcc, 0xdd, 0xee, 0xff};
+      let expected = std::span{expected_bytes}.last(size);
       if (right) {
         for (unsigned i = 0; i <= offset; i++)
-          expected[7 - offset + i] = i;
+          expected[size - 1 - offset + i] = i;
       } else {
-        for (unsigned i = offset; i < 8; i++)
+        for (unsigned i = offset; i < size; i++)
           expected[i - offset] = i;
       }
       std::uint64_t value = 0;
       for (const let byte : expected)
         value = (value << 8) | byte;
+      if constexpr (Word)
+        value = static_cast<std::uint64_t>(std::int64_t{
+            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(value))});
       require(native->run(registers, **memory).has_value() &&
                   registers[2] == value,
-              "LDL/LDR merge every byte offset and preserve untouched register "
+              "word/doubleword merge loads merge every byte offset and "
+              "preserve untouched register "
               "bytes");
     }
     std::array<std::uint64_t, 32> registers{};
@@ -1580,8 +1587,9 @@ fn merged_doubleword_loads() -> void {
   alignas(std::max_align_t) std::array<std::byte, 16384> storage;
   std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                             std::pmr::null_memory_resource()};
-  const std::array pair{mips::instruction_word{0x68220000},
-                        mips::instruction_word{0x6c220007}};
+  const std::array pair{
+      mips::instruction_word{Word ? 0x88220000u : 0x68220000u},
+      mips::instruction_word{Word ? 0x98220003u : 0x6c220007u}};
   let block = mips::translate(pair, {0x8000}, arena);
   require(block.has_value(), "translate paired unaligned load");
   let native = compiler->compile(*block, arena);
@@ -1590,15 +1598,18 @@ fn merged_doubleword_loads() -> void {
   registers[1] = 0x1ffd;
   const let fault = native->run(registers, **memory);
   require(!fault && fault.error().pc == 0x8004 &&
-              registers[2] == 0xfdfeff0000000000ULL,
+              registers[2] ==
+                  (Word ? 0xfffffffffdfeff00ULL : 0xfdfeff0000000000ULL),
           "faulting second merge preserves completed first merge");
   require((*memory)
               ->map_ram({0x2000}, {mem::page_size}, mem::permission::read)
               .has_value(),
           "map second source page");
-  require(native->run(registers, **memory).has_value() &&
-              registers[2] == 0xfdfeff0001020304ULL,
-          "LDL/LDR pair joins bytes across a page boundary");
+  require(
+      native->run(registers, **memory).has_value() &&
+          registers[2] ==
+              (Word ? 0xfffffffffdfeff00ULL : 0xfdfeff0001020304ULL),
+      "word/doubleword merge loads pair joins bytes across a page boundary");
 }
 
 fn indexed_cache_maintenance() -> void {
@@ -2553,7 +2564,8 @@ fn main(int argc, char **argv) -> int {
   memory_barriers();
   cp0_clock();
   cop1_transfers();
-  merged_doubleword_loads();
+  merged_loads<false>();
+  merged_loads<true>();
   indexed_cache_maintenance();
   hilo_arithmetic();
   hilo_transfers();
