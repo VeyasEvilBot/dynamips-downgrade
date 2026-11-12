@@ -704,6 +704,40 @@ fn signed_byte_loads() -> void {
           "byte load reports exact unmapped address");
 }
 
+fn sign_branches() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create sign branch compiler");
+  for (std::uint32_t kind = 0; kind < 4; kind++) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{0x04200003u | (kind << 16)},
+                           mips::instruction_word{0x34010007},
+                           mips::instruction_word{0x34030009}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block && block->info().instruction_count == 2 && block->branch(),
+            "sign branches include exactly one delay slot");
+    require(ir::optimize(*block, ir::fold_constants).has_value(),
+            "optimize sign branch");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile sign branch");
+    for (const std::uint64_t value :
+         {0ULL, 1ULL, 0x7fffffffffffffffULL, 0x8000000000000000ULL,
+          0xffffffffffffffffULL}) {
+      std::array<std::uint64_t, 32> state{};
+      state[1] = value;
+      const bool negative = (value >> 63) != 0;
+      const bool taken = (kind & 1) ? !negative : negative;
+      const let result = native->run(state);
+      require(result && *result == (taken ? 0x1010u : 0x1008u) &&
+                  state[1] == (kind >= 2 && !taken ? value : 7) &&
+                  state[3] == 0,
+              "sign branches use full-width pre-slot values and annul likely "
+              "slots");
+    }
+  }
+}
+
 fn branches_and_dispatch() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -1503,6 +1537,7 @@ fn main(int argc, char **argv) -> int {
   signed_byte_loads();
   mmio_console();
   example_program();
+  sign_branches();
   branches_and_dispatch();
   branch_likely();
   hilo_transfers();

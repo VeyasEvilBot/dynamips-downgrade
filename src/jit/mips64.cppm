@@ -29,7 +29,8 @@ struct guest_address {
 
 constexpr fn is_branch(instruction_word word) noexcept -> bool {
   const let op = word.bits >> 26;
-  return op == 4 || op == 5 || op == 0x14 || op == 0x15;
+  return op == 4 || op == 5 || op == 0x14 || op == 0x15 ||
+         (op == 1 && ((word.bits >> 16) & 31) <= 3);
 }
 
 constexpr fn has_delay_slot(instruction_word word) noexcept -> bool {
@@ -350,18 +351,28 @@ struct error {
       continue;
     }
     if (branch) {
-      const let right = read(rt);
+      const bool sign_branch = opcode == 1;
+      const let right = read(sign_branch ? 0 : rt);
       if (!right)
         return failed(right.error());
+      let condition = *left;
+      if (sign_branch) {
+        const let negative = result.append(ir::node::binary(
+            ir::binary_kind::signed_less, *left, *right, source));
+        if (!negative)
+          return failed(negative.error());
+        condition = *negative;
+      }
       const let displacement =
           std::int64_t{static_cast<std::int16_t>(bits & 0xffff)} * 4;
       const let target =
           start.value + i * 4 + 4 + static_cast<std::uint64_t>(displacement);
-      if (let exit = result.set_branch({*left, *right, target, source,
-                                         (opcode == 4 || opcode == 0x14)
-                                             ? ir::branch_kind::equal
-                                             : ir::branch_kind::not_equal,
-                                         opcode == 0x14 || opcode == 0x15});
+      const bool equal =
+          sign_branch ? (rt & 1) != 0 : opcode == 4 || opcode == 0x14;
+      if (let exit = result.set_branch(
+              {condition, *right, target, source,
+               equal ? ir::branch_kind::equal : ir::branch_kind::not_equal,
+               sign_branch ? rt >= 2 : opcode == 0x14 || opcode == 0x15});
           !exit)
         return failed(exit.error());
       continue;
