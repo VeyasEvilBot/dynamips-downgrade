@@ -290,6 +290,7 @@ public:
         case ir::opcode::sign_extend32:
         case ir::opcode::unsigned_less:
         case ir::opcode::signed_less:
+        case ir::opcode::subtract_wrap:
         case ir::opcode::add_wrap:
         case ir::opcode::bit_and:
         case ir::opcode::bit_or:
@@ -649,13 +650,15 @@ public:
                          : output.setl(result.r8());
           break;
         }
+        case ir::opcode::subtract_wrap:
         case ir::opcode::add_wrap:
         case ir::opcode::bit_and:
         case ir::opcode::bit_or:
         case ir::opcode::bit_xor: {
           let left = node.data.inputs.left;
           let right = node.data.inputs.right;
-          if (!immediate(right) && immediate(left))
+          if (node.op != ir::opcode::subtract_wrap && !immediate(right) &&
+              immediate(left))
             std::swap(left, right);
           const let left_value = operand(left);
           if (!left_value)
@@ -664,6 +667,8 @@ public:
           if (status)
             break;
           const let emit = [&](const auto &right_value) {
+            if (node.op == ir::opcode::subtract_wrap)
+              return output.sub(result, right_value);
             if (node.op == ir::opcode::add_wrap)
               return output.add(result, right_value);
             if (node.op == ir::opcode::bit_and)

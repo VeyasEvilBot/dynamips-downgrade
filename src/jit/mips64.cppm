@@ -29,7 +29,7 @@ struct guest_address {
 
 constexpr fn is_branch(instruction_word word) noexcept -> bool {
   const let op = word.bits >> 26;
-  return op == 4 || op == 5 || op == 0x14 || op == 0x15 ||
+  return op == 6 || op == 7 || op == 4 || op == 5 || op == 0x14 || op == 0x15 ||
          (op == 1 && ((word.bits >> 16) & 31) <= 3);
 }
 
@@ -141,9 +141,10 @@ struct error {
   const let extra_nodes = static_cast<std::size_t>(
       std::ranges::count_if(words, [](instruction_word word) {
         const let op = word.bits >> 26;
-        return (op == 0 && (word.bits & 63) == 0x21) || op == 0x09 ||
-               op == 0x20 || op == 0x23 || op == 0x28 || op == 0x2b ||
-               op == 0x37 || op == 0x3f;
+        return (op == 0 &&
+                ((word.bits & 63) == 0x21 || (word.bits & 63) == 0x23)) ||
+               op == 0x09 || op == 0x20 || op == 0x23 || op == 0x28 ||
+               op == 0x2b || op == 0x37 || op == 0x3f;
       }));
   if (extra_nodes > std::numeric_limits<std::uint32_t>::max() ||
       words.size() > (std::numeric_limits<std::uint32_t>::max() - extra_nodes) /
@@ -184,6 +185,9 @@ struct error {
         opcode == 0 &&
         (function == 0x38 || function == 0x3a || function == 0x3b ||
          function == 0x3c || function == 0x3e || function == 0x3f);
+    const bool subu = opcode == 0 && function == 0x23;
+    const bool slt = opcode == 0 && function == 0x2a;
+    const bool sltu = opcode == 0 && function == 0x2b;
     const bool addu = opcode == 0 && function == 0x21;
     const bool mfc0 = opcode == 0x10 && (rs == 0 || rs == 1);
     const bool mtc0 = opcode == 0x10 && (rs == 4 || rs == 5);
@@ -202,7 +206,7 @@ struct error {
     const bool indirect = opcode == 0 && (function == 8 || function == 9);
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !eret &&
-        !hilo_read && !hilo_write && !addu &&
+        !hilo_read && !hilo_write && !addu && !subu && !slt && !sltu &&
         !(opcode == 0 && (function == 0x24 || function == 0x25 ||
                           function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
@@ -222,6 +226,8 @@ struct error {
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (indirect && (rt != 0 || (function == 8 && rd != 0) ||
                      (function == 9 && rd == rs) || ((bits >> 6) & 31) != 0))
+      return std::unexpected(error{error_code::invalid_encoding, i});
+    if ((opcode == 6 || opcode == 7) && rt != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (lui && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
@@ -390,14 +396,16 @@ struct error {
       continue;
     }
     if (branch) {
-      const bool sign_branch = opcode == 1;
+      const bool sign_branch = opcode == 1 || opcode == 6 || opcode == 7;
+      const bool positive = opcode == 6 || opcode == 7;
       const let right = read(sign_branch ? 0 : rt);
       if (!right)
         return failed(right.error());
       let condition = *left;
       if (sign_branch) {
         const let negative = result.append(ir::node::binary(
-            ir::binary_kind::signed_less, *left, *right, source));
+            ir::binary_kind::signed_less, positive ? *right : *left,
+            positive ? *left : *right, source));
         if (!negative)
           return failed(negative.error());
         condition = *negative;
@@ -406,12 +414,13 @@ struct error {
           std::int64_t{static_cast<std::int16_t>(bits & 0xffff)} * 4;
       const let target =
           start.value + i * 4 + 4 + static_cast<std::uint64_t>(displacement);
-      const bool equal =
-          sign_branch ? (rt & 1) != 0 : opcode == 4 || opcode == 0x14;
+      const bool equal = positive      ? opcode == 6
+                         : sign_branch ? (rt & 1) != 0
+                                       : opcode == 4 || opcode == 0x14;
       if (let exit = result.set_branch(
               {condition, *right, target, source,
                equal ? ir::branch_kind::equal : ir::branch_kind::not_equal,
-               sign_branch ? rt >= 2 : opcode == 0x14 || opcode == 0x15});
+               opcode == 1 ? rt >= 2 : opcode == 0x14 || opcode == 0x15});
           !exit)
         return failed(exit.error());
       continue;
@@ -465,8 +474,9 @@ struct error {
                   : read(rt);
     if (!right)
       return failed(right.error());
-    const let operation = sltiu               ? ir::binary_kind::unsigned_less
-                          : slti              ? ir::binary_kind::signed_less
+    const let operation = subu                ? ir::binary_kind::subtract_wrap
+                          : (sltiu || sltu)   ? ir::binary_kind::unsigned_less
+                          : (slti || slt)     ? ir::binary_kind::signed_less
                           : opcode == 0x0e    ? ir::binary_kind::bit_xor
                           : opcode == 0x0c    ? ir::binary_kind::bit_and
                           : (addiu || daddiu) ? ir::binary_kind::add_wrap
@@ -479,7 +489,7 @@ struct error {
         result.append(ir::node::binary(operation, *left, *right, source));
     if (!value)
       return failed(value.error());
-    if (addiu || addu) {
+    if (addiu || addu || subu) {
       value = result.append(ir::node::sign_extend32(*value, source));
       if (!value)
         return failed(value.error());

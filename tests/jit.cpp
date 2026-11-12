@@ -577,25 +577,44 @@ fn word_addition() -> void {
   alignas(std::max_align_t) std::array<std::byte, 16384> storage;
   std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                             std::pmr::null_memory_resource()};
-  constexpr std::array words{mips::instruction_word{0x00221821}};
-  let block = mips::translate(words, {0x1000}, arena);
-  require(block.has_value(), "translate ADDU");
-  let native = compiler->compile(*block, arena);
-  require(native.has_value(), "compile ADDU");
-  for (const std::uint64_t left :
-       {0ULL, 0x7fffffffULL, 0xffffffffULL, 0x1234567880000000ULL}) {
-    for (const std::uint64_t right : {0ULL, 1ULL, 0xffffffffffffffffULL}) {
-      std::array<std::uint64_t, 32> state{};
-      state[1] = left;
-      state[2] = right;
-      const let low = static_cast<std::uint32_t>(left + right);
-      require(
-          native->run(state).has_value() &&
-              state[3] == static_cast<std::uint64_t>(
-                              std::int64_t{std::bit_cast<std::int32_t>(low)}),
-          "ADDU wraps at 32 bits and sign extends without an overflow trap");
+  for (const std::uint32_t function : {0x21u, 0x23u, 0x2au, 0x2bu}) {
+    const std::array words{mips::instruction_word{0x00221800u | function}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block.has_value(), "translate integer operation");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile integer operation");
+    for (const std::uint64_t left :
+         {0ULL, 0x7fffffffULL, 0xffffffffULL, 0x1234567880000000ULL,
+          0xffffffffffffffffULL}) {
+      for (const std::uint64_t right : {0ULL, 1ULL, 0xffffffffffffffffULL}) {
+        std::array<std::uint64_t, 32> state{};
+        state[1] = left;
+        state[2] = right;
+        const let low = static_cast<std::uint32_t>(
+            function == 0x23 ? left - right : left + right);
+        const let expected =
+            function == 0x2a ? std::uint64_t{std::bit_cast<std::int64_t>(left) <
+                                             std::bit_cast<std::int64_t>(right)}
+            : function == 0x2b ? std::uint64_t{left < right}
+                               : static_cast<std::uint64_t>(std::int64_t{
+                                     std::bit_cast<std::int32_t>(low)});
+        require(native->run(state).has_value() && state[3] == expected,
+                "integer operations preserve operand order, word wrapping and "
+                "signedness");
+      }
     }
   }
+  constexpr std::array subtract{mips::instruction_word{0x00011823}};
+  let subtraction = mips::translate(subtract, {0x1000}, arena);
+  require(subtraction.has_value(), "translate zero minus register");
+  let negative = compiler->compile(*subtraction, arena);
+  require(negative.has_value(), "compile noncommutative subtraction");
+  std::array<std::uint64_t, 32> difference{};
+  difference[1] = 3;
+  require(negative->run(difference).has_value() &&
+              difference[3] == 0xfffffffffffffffdULL,
+          "SUBU cannot swap a constant left operand with its register right "
+          "operand");
   constexpr std::array constants{mips::instruction_word{0x3401ffff},
                                  mips::instruction_word{0x00010fc0},
                                  mips::instruction_word{0x00211821}};
@@ -791,13 +810,14 @@ fn signed_byte_loads() -> void {
 fn sign_branches() -> void {
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create sign branch compiler");
-  for (std::uint32_t kind = 0; kind < 4; kind++) {
+  for (std::uint32_t kind = 0; kind < 6; kind++) {
     alignas(std::max_align_t) std::array<std::byte, 8192> storage;
     std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                               std::pmr::null_memory_resource()};
-    const std::array words{mips::instruction_word{0x04200003u | (kind << 16)},
-                           mips::instruction_word{0x34010007},
-                           mips::instruction_word{0x34030009}};
+    const std::array words{
+        mips::instruction_word{kind < 4 ? 0x04200003u | (kind << 16)
+                                        : ((kind + 2) << 26) | (1u << 21) | 3u},
+        mips::instruction_word{0x34010007}, mips::instruction_word{0x34030009}};
     let block = mips::translate(words, {0x1000}, arena);
     require(block && block->info().instruction_count == 2 && block->branch(),
             "sign branches include exactly one delay slot");
@@ -811,10 +831,14 @@ fn sign_branches() -> void {
       std::array<std::uint64_t, 32> state{};
       state[1] = value;
       const bool negative = (value >> 63) != 0;
-      const bool taken = (kind & 1) ? !negative : negative;
+      const bool taken = kind == 4    ? negative || value == 0
+                         : kind == 5  ? !negative && value != 0
+                         : (kind & 1) ? !negative
+                                      : negative;
       const let result = native->run(state);
       require(result && *result == (taken ? 0x1010u : 0x1008u) &&
-                  state[1] == (kind >= 2 && !taken ? value : 7) &&
+                  state[1] ==
+                      ((kind == 2 || kind == 3) && !taken ? value : 7) &&
                   state[3] == 0,
               "sign branches use full-width pre-slot values and annul likely "
               "slots");
