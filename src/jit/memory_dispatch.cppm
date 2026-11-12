@@ -74,12 +74,16 @@ public:
           entry.code->run(state.registers, memory_, &state.cop0, &state.hilo);
       if (!executed) {
         state.pc.value = executed.error().pc;
-        return std::unexpected(dispatch_error{dispatch_error_code::memory,
-                                              state.pc.value,
-                                              executed.error().access,
-                                              {},
-                                              {},
-                                              executed.error().branch_pc});
+        return std::unexpected(dispatch_error{
+            executed.error().code == amd64::error_code::memory_fault
+                ? dispatch_error_code::memory
+                : dispatch_error_code::execution,
+            state.pc.value,
+            executed.error().access,
+            {},
+            {},
+            executed.error().branch_pc,
+            executed.error().code});
       }
       state.pc.value = *executed;
       result.instructions += entry.instructions;

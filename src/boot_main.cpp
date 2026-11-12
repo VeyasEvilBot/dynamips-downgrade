@@ -25,6 +25,7 @@ import machine.core;
 import machine.c7200;
 import jit.memory;
 import jit.dispatch;
+import jit.amd64;
 import jit.devices;
 
 namespace {
@@ -154,6 +155,9 @@ fn run(const char *rom_path, const char *ios_path,
           std::println(stderr,
                        "boot: unsupported instruction {:#010x} at PC {:#x}",
                        *word, guest->pc);
+        } else if (guest->code == jit::dispatch_error_code::execution) {
+          std::println(stderr, "boot: {} at PC {:#x}",
+                       jit::amd64::message({guest->execution}), guest->pc);
         } else if (guest->code == jit::dispatch_error_code::memory) {
           std::println(stderr,
                        "boot blocked at PC {:#x}: memory fault {} at {:#x}",

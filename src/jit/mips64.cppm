@@ -17,6 +17,7 @@ module;
 export module jit.mips64;
 
 import jit.ir;
+import jit.tlb;
 
 export namespace jit::mips64 {
 
@@ -50,6 +51,7 @@ constexpr fn jump_target(instruction_word word, guest_address pc) noexcept
 }
 
 struct cop0_state {
+  tlb::table translations;
   std::array<std::uint64_t, 32> registers{};
 
   fn exception(std::uint32_t code, guest_address pc, bool delay_slot) noexcept
@@ -77,6 +79,14 @@ struct cop0_state {
   fn write(std::uint16_t slot, std::uint32_t value) noexcept -> void {
     if (slot == 7 || slot == 8 || slot == 15 || slot == 16)
       return;
+    if (slot == 0 || slot == 6)
+      value &= 63;
+    else if (slot == 5)
+      value &= 0x01ffe000;
+    else if (slot == 2 || slot == 3)
+      value &= 0x7fffffff;
+    else if (slot == 10)
+      value &= 0xffffe0ff;
     registers[slot] = value;
     if (slot == 11)
       registers[13] &= ~(1u << 15);
@@ -152,7 +162,9 @@ struct error {
   if (start.value % 4 != 0)
     return std::unexpected(error{error_code::unaligned_pc, 0});
   for (std::size_t i = 0; i < words.size(); i++) {
-    if (words[i].bits >> 26 == 0x2f || words[i].bits == 0x42000018 ||
+    if (words[i].bits == 0x42000001 || words[i].bits == 0x42000002 ||
+        words[i].bits == 0x42000008 || words[i].bits >> 26 == 0x2f ||
+        words[i].bits == 0x42000018 ||
         ((words[i].bits >> 26) == 0 &&
          ((words[i].bits & 63) == 0x0c || (words[i].bits & 63) == 0x0f))) {
       words = words.first(i + 1);
@@ -222,6 +234,8 @@ struct error {
     const bool hilo_write =
         opcode == 0 && (function == 0x11 || function == 0x13);
     const bool cache = opcode == 0x2f;
+    const bool tlb_operation =
+        bits == 0x42000001 || bits == 0x42000002 || bits == 0x42000008;
     const bool eret = bits == 0x42000018;
     const bool sync = opcode == 0 && function == 0x0f;
     const bool syscall = opcode == 0 && function == 0x0c;
@@ -258,14 +272,16 @@ struct error {
     const bool indirect = opcode == 0 && (function == 8 || function == 9);
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !sync &&
-        !eret && !cache && !hilo_read && !hilo_write && !addu && !subu &&
-        !slt && !sltu && !variable_shift && !nor && !hilo_arithmetic &&
+        !tlb_operation && !eret && !cache && !hilo_read && !hilo_write &&
+        !addu && !subu && !slt && !sltu && !variable_shift && !nor &&
+        !hilo_arithmetic &&
         !(opcode == 0 && (function == 0x24 || function == 0x25 ||
                           function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !sync &&
-        !eret && !cache && !hilo_read && !hilo_write && ((bits >> 6) & 31) != 0)
+        !tlb_operation && !eret && !cache && !hilo_read && !hilo_write &&
+        ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((hilo_read && (rs != 0 || rt != 0 || ((bits >> 6) & 31) != 0)) ||
         (hilo_write && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0)))
@@ -281,7 +297,8 @@ struct error {
     if ((mtc0 || mfc0) &&
         ((bits & 0x7ff) != 0 ||
          (rd != 9 && rd != 11 && rd != 12 && rd != 13 && rd != 15 && rd != 16 &&
-          rd != 7 && rd != 8 && rd != 14 && rd != 30)))
+          rd != 7 && rd != 8 && rd != 14 && rd != 30 && rd != 0 && rd != 2 &&
+          rd != 3 && rd != 5 && rd != 6 && rd != 10)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (indirect && (rt != 0 || (function == 8 && rd != 0) ||
                      (function == 9 && rd == rs) || ((bits >> 6) & 31) != 0))
@@ -292,8 +309,8 @@ struct error {
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = mfc0 || immediate || memory_access ? rt : rd;
     if (destination == 0 && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !syscall && !sync && !eret && !cache && !hilo_write && !addi &&
-        !hilo_arithmetic)
+        !mtc0 && !syscall && !sync && !tlb_operation && !eret && !cache &&
+        !hilo_write && !addi && !hilo_arithmetic)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -302,6 +319,16 @@ struct error {
                                        : error_code::invalid_ir,
                                    i});
     };
+    if (tlb_operation) {
+      if (let operated = result.append(ir::node::tlb_operation(
+              bits == 0x42000001   ? ir::tlb_action::read
+              : bits == 0x42000002 ? ir::tlb_action::write_indexed
+                                   : ir::tlb_action::probe,
+              source));
+          !operated)
+        return failed(operated.error());
+      continue;
+    }
     if (sync) {
       if (let fenced = result.append(ir::node::memory_barrier(source));
           !fenced)

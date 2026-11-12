@@ -24,6 +24,7 @@ import asmjit;
 import jit.mips64;
 import jit.ir;
 import jit.memory;
+import jit.tlb;
 
 export namespace jit::amd64 {
 
@@ -37,6 +38,7 @@ enum class error_code {
   cop0_required,
   hilo_required,
   memory_fault,
+  invalid_tlb_state,
 };
 
 struct error {
@@ -72,6 +74,8 @@ struct execution_error {
     return "block requires CP0 state";
   case error_code::memory_required:
     return "block requires guest memory";
+  case error_code::invalid_tlb_state:
+    return "invalid TLB register state";
   case error_code::memory_fault:
     return "guest memory access failed";
   }
@@ -139,7 +143,7 @@ public:
     const let pc = entry_(state.data(), &context);
     if (context.failed)
       return std::unexpected(execution_error{
-          error_code::memory_fault, pc, context.fault,
+          context.issue, pc, context.fault,
           branch_pc_ && pc == *branch_pc_ + 4 ? branch_pc_ : std::nullopt});
     return pc;
   }
@@ -153,6 +157,7 @@ private:
     mips64::hilo_state *hilo;
     memory::fault fault{};
     bool failed = false;
+    error_code issue = error_code::memory_fault;
   };
 
   using entry_point = std::uint64_t (*)(std::uint64_t *, execution_context *);
@@ -185,6 +190,37 @@ private:
     if (!result) {
       context->fault = result.error();
       context->failed = true;
+    }
+  }
+
+  static fn tlb_operation(execution_context *context,
+                           std::uint32_t operation) noexcept -> void {
+    let &cp0 = *context->cop0;
+    const let index = static_cast<std::size_t>(cp0.registers[0] & 63);
+    if (operation == 0) {
+      const let value = cp0.translations.read(index);
+      if (value) {
+        cp0.registers[5] = value->mask;
+        cp0.registers[10] = value->high;
+        cp0.registers[2] = value->low[0];
+        cp0.registers[3] = value->low[1];
+      }
+      context->memory->invalidate();
+    } else if (operation == 1) {
+      const let written =
+          cp0.translations.write(index, {cp0.registers[5],
+                                         cp0.registers[10],
+                                         {cp0.registers[2], cp0.registers[3]}});
+      if (!written) {
+        context->failed = true;
+        context->issue = error_code::invalid_tlb_state;
+        return;
+      }
+      context->memory->invalidate();
+    } else {
+      const let found = cp0.translations.probe(
+          {cp0.registers[10]}, static_cast<std::uint8_t>(cp0.registers[10]));
+      cp0.registers[0] = found ? *found : 0x80000000ULL;
     }
   }
 
@@ -225,12 +261,16 @@ private:
   static fn write_cop0(execution_context *context, std::uint32_t slot,
                         std::uint64_t value, std::uint32_t wide) noexcept
       -> void {
-    if (wide && (slot == 14 || slot == 30)) {
-      context->cop0->registers[slot] = value;
-      return;
-    }
-    context->cop0->write(static_cast<std::uint16_t>(slot),
-                         static_cast<std::uint32_t>(value));
+    const let old_asid = context->cop0->registers[10] & 255;
+    if (wide && (slot == 10 || slot == 14 || slot == 30))
+      context->cop0->registers[slot] =
+          slot == 10 ? value & 0xc00000ffffffe0ffULL : value;
+    else
+      context->cop0->write(static_cast<std::uint16_t>(slot),
+                           static_cast<std::uint32_t>(value));
+    if (context->memory && slot == 10 &&
+        old_asid != (context->cop0->registers[10] & 255))
+      context->memory->invalidate();
   }
 
   compiled_block(std::shared_ptr<asmjit::JitRuntime> runtime, entry_point entry,
@@ -428,6 +468,22 @@ public:
                                      : output.je(annulled))
             return failure(status, i);
           guarded_slot = true;
+        }
+        if (node.op == ir::opcode::tlb_operation) {
+          uses_cop0 = true;
+          uses_memory = true;
+          asmjit::InvokeNode *call = nullptr;
+          if (const let status = output.invoke(
+                  &call, asmjit::Imm{&compiled_block::tlb_operation},
+                  asmjit::FuncSignature::build<
+                      void, compiled_block::execution_context *,
+                      std::uint32_t>()))
+            return failure(status, i);
+          call->setArg(0, context);
+          call->setArg(1, asmjit::Imm{node.data.immediate});
+          if (const let emitted = check_memory(node))
+            return failure(emitted, i);
+          continue;
         }
         if (node.op == ir::opcode::memory_barrier) {
           if (const let status = output.mfence())
@@ -672,8 +728,12 @@ public:
                       offsetof(compiled_block::execution_context, cop0), 8}))
             return failure(status, i);
           const bool wide = node.op == ir::opcode::read_cop0_64;
-          const asmjit::x86::Mem location{base, node.slot.index * 8,
-                                          wide ? 8u : 4u};
+          const asmjit::x86::Mem location{
+              base,
+              static_cast<std::int32_t>(
+                  offsetof(mips64::cop0_state, registers) +
+                  node.slot.index * 8),
+              wide ? 8u : 4u};
           const let status = wide ? output.mov(result, location)
                                   : output.movsxd(result, location);
           if (status)
@@ -854,6 +914,7 @@ public:
         case ir::opcode::read_hilo:
         case ir::opcode::write_hilo:
         case ir::opcode::add_checked32:
+        case ir::opcode::tlb_operation:
         case ir::opcode::memory_barrier:
         case ir::opcode::cache_index:
         case ir::opcode::exception_return:

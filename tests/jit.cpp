@@ -20,6 +20,7 @@ import jit.ir;
 import jit.mips64;
 import jit.amd64;
 import jit.memory;
+import jit.tlb;
 import jit.uart;
 import jit.example;
 import jit.dispatch;
@@ -1228,6 +1229,87 @@ fn algebraic_register_identities() -> void {
   }
 }
 
+fn architectural_tlb() -> void {
+  namespace mem = jit::memory;
+  namespace tlb = jit::tlb;
+  for (const std::uint64_t mask : {0ULL, 0x6000ULL, 0x1e000ULL, 0x7e000ULL,
+                                   0x1fe000ULL, 0x7fe000ULL, 0x1ffe000ULL}) {
+    tlb::table table;
+    const let bytes = ((mask | 0x1fffULL) + 1) / 2;
+    require(table
+                .write(5, {mask,
+                           0x60000007,
+                           {(0x02000000 >> 6) | 7, (0x04000000 >> 6) | 7}})
+                .has_value(),
+            "program paired TLB pages");
+    const let even =
+        table.translate({0x60000000 + bytes - 1}, 99, mem::access_kind::read);
+    require(even && even->value == 0x02000000 + bytes - 1,
+            "TLB even pages preserve offsets and global mappings ignore ASID");
+    const let odd = table.translate({0x60000000 + bytes + 123}, 99,
+                                    mem::access_kind::write);
+    require(odd && odd->value == 0x04000000 + 123,
+            "TLB odd page selection works from 4 KiB through 16 MiB");
+  }
+  tlb::table table;
+  require(table.write(5, {0, 0x60000007, {6, 6}}).has_value(),
+          "program ASID-local mapping");
+  require(table.probe({0x60000000}, 7) == 5 && !table.probe({0x60000000}, 8),
+          "local TLB entries match the current ASID");
+  require(table.write(5, {0, 0x60000007, {3, 0}}).has_value(),
+          "program protected and invalid halves");
+  const let dirty = table.translate({0x60000000}, 7, mem::access_kind::write);
+  const let invalid = table.translate({0x60001000}, 7, mem::access_kind::read);
+  require(
+      !dirty && dirty.error() == tlb::error::modified && !invalid &&
+          invalid.error() == tlb::error::invalid &&
+          !table.probe({0x60000000}, 8),
+      "V/D bits and the paired global-bit rule retain distinct TLB failures");
+  require(!table.write(64, {}) && !table.write(0, {0x2000, 0, {}}),
+          "reject invalid TLB indices and unsupported page masks");
+  alignas(std::max_align_t) std::array<std::byte, 32768> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  let compiler = amd64::compiler::create();
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(compiler && memory, "prepare native TLB instructions");
+  mips::cop0_state cp0;
+  cp0.registers[0] = 5;
+  cp0.registers[5] = 0x6000;
+  cp0.registers[10] = 0x60000007;
+  cp0.registers[2] = 6;
+  cp0.registers[3] = 0x106;
+  std::array<std::uint64_t, 32> state{};
+  const let run = [&](std::uint32_t bits) {
+    const std::array words{mips::instruction_word{bits}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block.has_value(), "translate TLB operation");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile TLB operation");
+    return native->run(state, **memory, &cp0);
+  };
+  require(run(0x42000002).has_value(), "TLBWI installs CP0 register contents");
+  cp0.registers[5] = cp0.registers[10] = cp0.registers[2] = cp0.registers[3] =
+      0;
+  require(run(0x42000001).has_value() && cp0.registers[5] == 0x6000 &&
+              cp0.registers[10] == 0x60000007 && cp0.registers[2] == 6 &&
+              cp0.registers[3] == 0x106,
+          "TLBR restores both page halves and the complete EntryHi");
+  require(run(0x42000008).has_value() && cp0.registers[0] == 5,
+          "TLBP reports a matching index");
+  cp0.registers[10] = 0x60000008;
+  require(run(0x42000008).has_value() && cp0.registers[0] == 0x80000000,
+          "TLBP records probe failure when the ASID does not match");
+  cp0.registers[0] = 5;
+  cp0.registers[5] = 0x2000;
+  const let failed = run(0x42000002);
+  require(!failed &&
+              failed.error().code == amd64::error_code::invalid_tlb_state &&
+              failed.error().pc == 0x1000,
+          "invalid native TLB writes return a typed execution failure");
+}
+
 fn prefetch_hints() -> void {
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create PREF compiler");
@@ -2236,6 +2318,7 @@ fn main(int argc, char **argv) -> int {
   branches_and_dispatch();
   branch_likely();
   algebraic_register_identities();
+  architectural_tlb();
   prefetch_hints();
   memory_barriers();
   indexed_cache_maintenance();

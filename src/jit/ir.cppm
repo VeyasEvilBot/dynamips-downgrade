@@ -38,6 +38,7 @@ enum class width : std::uint8_t { bits32 = 32, bits64 = 64 };
 enum class opcode : std::uint8_t {
   syscall,
   memory_barrier,
+  tlb_operation,
   cache_index,
   exception_return,
   constant,
@@ -83,13 +84,13 @@ enum class opcode : std::uint8_t {
 };
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
-  return op != opcode::memory_barrier && op != opcode::cache_index &&
-         op != opcode::multiply32 && op != opcode::divide_unsigned32 &&
-         op != opcode::exception_return && op != opcode::write_hilo &&
-         op != opcode::syscall && op != opcode::write_cop0_64 &&
-         op != opcode::write_cop0 && op != opcode::write_state &&
-         op != opcode::store16 && op != opcode::store8 &&
-         op != opcode::store32 && op != opcode::store64;
+  return op != opcode::tlb_operation && op != opcode::memory_barrier &&
+         op != opcode::cache_index && op != opcode::multiply32 &&
+         op != opcode::divide_unsigned32 && op != opcode::exception_return &&
+         op != opcode::write_hilo && op != opcode::syscall &&
+         op != opcode::write_cop0_64 && op != opcode::write_cop0 &&
+         op != opcode::write_state && op != opcode::store16 &&
+         op != opcode::store8 && op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t {
@@ -121,6 +122,8 @@ union payload {
   operands inputs;
 };
 
+enum class tlb_action : std::uint32_t { read, write_indexed, probe };
+
 struct node {
   payload data;
   std::uint32_t source_index;
@@ -131,6 +134,15 @@ struct node {
   static constexpr fn alias(value_id input, std::uint32_t source,
                              width type = width::bits64) noexcept -> node {
     return {{.inputs = {input, {}}}, source, {}, opcode::alias, type};
+  }
+
+  static constexpr fn tlb_operation(tlb_action operation,
+                                     std::uint32_t source) noexcept -> node {
+    return {{.immediate = static_cast<std::uint32_t>(operation)},
+            source,
+            {},
+            opcode::tlb_operation,
+            width::bits64};
   }
 
   static constexpr fn memory_barrier(std::uint32_t source) noexcept -> node {
@@ -650,6 +662,10 @@ private:
       if (!operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::tlb_operation:
+      if (current.type != width::bits64 || current.data.immediate > 2)
+        return fail(error_code::invalid_operand);
+      break;
     case opcode::cache_index:
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
@@ -684,6 +700,9 @@ private:
       if (current.slot.index != 9 && current.slot.index != 11 &&
           current.slot.index != 12 && current.slot.index != 13 &&
           current.slot.index != 15 && current.slot.index != 16 &&
+          current.slot.index != 0 && current.slot.index != 2 &&
+          current.slot.index != 3 && current.slot.index != 5 &&
+          current.slot.index != 6 && current.slot.index != 10 &&
           current.slot.index != 7 && current.slot.index != 8 &&
           current.slot.index != 14 && current.slot.index != 30)
         return fail(error_code::invalid_slot);
@@ -786,6 +805,12 @@ private:
       case opcode::alias:
         out = std::format_to(out, "  %v{} = alias i{} %v{}", i, bits,
                              current.data.inputs.left.index);
+        break;
+      case opcode::tlb_operation:
+        out = std::format_to(out, "  tlb.{}",
+                             current.data.immediate == 0   ? "read"
+                             : current.data.immediate == 1 ? "write.indexed"
+                                                           : "probe");
         break;
       case opcode::memory_barrier:
         out = std::format_to(out, "  fence memory");
