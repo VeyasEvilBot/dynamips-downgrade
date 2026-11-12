@@ -36,6 +36,7 @@ enum class error_code {
   unavailable,
   memory_required,
   cop0_required,
+  cop1_required,
   hilo_required,
   memory_fault,
   invalid_tlb_state,
@@ -70,6 +71,8 @@ struct execution_error {
     return "native AMD64 backend is unavailable";
   case error_code::hilo_required:
     return "block requires HI/LO state";
+  case error_code::cop1_required:
+    return "block requires COP1 state";
   case error_code::cop0_required:
     return "block requires CP0 state";
   case error_code::memory_required:
@@ -93,7 +96,8 @@ public:
       : runtime_(std::move(other.runtime_)),
         entry_(std::exchange(other.entry_, nullptr)), slots_(other.slots_),
         uses_memory_(other.uses_memory_), uses_cop0_(other.uses_cop0_),
-        uses_hilo_(other.uses_hilo_), branch_pc_(other.branch_pc_) {}
+        uses_hilo_(other.uses_hilo_), uses_cop1_(other.uses_cop1_),
+        branch_pc_(other.branch_pc_) {}
 
   fn operator=(compiled_block &&other) noexcept -> compiled_block & {
     if (this != &other) {
@@ -104,6 +108,7 @@ public:
       uses_memory_ = other.uses_memory_;
       uses_cop0_ = other.uses_cop0_;
       uses_hilo_ = other.uses_hilo_;
+      uses_cop1_ = other.uses_cop1_;
       branch_pc_ = other.branch_pc_;
     }
     return *this;
@@ -117,6 +122,8 @@ public:
       return std::unexpected(error{error_code::unavailable});
     if (state.size() < slots_)
       return std::unexpected(error{error_code::invalid_state});
+    if (uses_cop1_)
+      return std::unexpected(error{error_code::cop1_required});
     if (uses_hilo_)
       return std::unexpected(error{error_code::hilo_required});
     if (uses_cop0_)
@@ -126,10 +133,10 @@ public:
     return entry_(state.data(), nullptr);
   }
 
-  [[nodiscard]] fn run(std::span<std::uint64_t> state,
-                        memory::address_space &memory,
-                        mips64::cop0_state *cop0 = nullptr,
-                        mips64::hilo_state *hilo = nullptr) const noexcept
+  [[nodiscard]] fn
+  run(std::span<std::uint64_t> state, memory::address_space &memory,
+      mips64::cop0_state *cop0 = nullptr, mips64::hilo_state *hilo = nullptr,
+      mips64::cop1_state *cop1 = nullptr) const noexcept
       -> std::expected<std::uint64_t, execution_error> {
     if (!entry_)
       return std::unexpected(execution_error{error_code::unavailable, 0});
@@ -139,7 +146,9 @@ public:
       return std::unexpected(execution_error{error_code::cop0_required, 0});
     if (uses_hilo_ && !hilo)
       return std::unexpected(execution_error{error_code::hilo_required, 0});
-    execution_context context{&memory, cop0, hilo};
+    if (uses_cop1_ && !cop1)
+      return std::unexpected(execution_error{error_code::cop1_required, 0});
+    execution_context context{&memory, cop0, hilo, cop1};
     const let pc = entry_(state.data(), &context);
     if (context.failed)
       return std::unexpected(execution_error{
@@ -155,6 +164,7 @@ private:
     memory::address_space *memory;
     mips64::cop0_state *cop0;
     mips64::hilo_state *hilo;
+    mips64::cop1_state *cop1;
     memory::fault fault{};
     bool failed = false;
     error_code issue = error_code::memory_fault;
@@ -292,11 +302,11 @@ private:
 
   compiled_block(std::shared_ptr<asmjit::JitRuntime> runtime, entry_point entry,
                  std::uint16_t slots, bool uses_memory, bool uses_cop0,
-                 bool uses_hilo,
+                 bool uses_hilo, bool uses_cop1,
                  std::optional<std::uint64_t> branch_pc) noexcept
       : runtime_(std::move(runtime)), entry_(entry), slots_(slots),
         uses_memory_(uses_memory), uses_cop0_(uses_cop0), uses_hilo_(uses_hilo),
-        branch_pc_(branch_pc) {}
+        uses_cop1_(uses_cop1), branch_pc_(branch_pc) {}
 
   std::shared_ptr<asmjit::JitRuntime> runtime_;
   entry_point entry_;
@@ -304,6 +314,7 @@ private:
   bool uses_memory_;
   bool uses_cop0_;
   bool uses_hilo_;
+  bool uses_cop1_;
   std::optional<std::uint64_t> branch_pc_;
 
   fn reset() noexcept -> void {
@@ -410,6 +421,7 @@ public:
       if (errors.code)
         return failure(errors.code, 0);
       function->setArg(1, context);
+      bool uses_cop1 = false;
       bool uses_memory = false;
       bool uses_cop0 = false;
       bool uses_hilo = false;
@@ -760,6 +772,35 @@ public:
             return failure(status, i);
           continue;
         }
+        if (node.op == ir::opcode::read_cop1_64 ||
+            node.op == ir::opcode::write_cop1_64) {
+          uses_cop1 = true;
+          const let base = output.newUIntPtr();
+          if (errors.code)
+            return failure(errors.code, i);
+          if (const let status = output.mov(
+                  base,
+                  asmjit::x86::Mem{
+                      context,
+                      offsetof(compiled_block::execution_context, cop1), 8}))
+            return failure(status, i);
+          const asmjit::x86::Mem location{base, node.slot.index * 8, 8};
+          if (node.op == ir::opcode::read_cop1_64) {
+            const let result = output.newUInt64();
+            if (errors.code)
+              return failure(errors.code, i);
+            if (const let status = output.mov(result, location))
+              return failure(status, i);
+            values[i] = result;
+          } else {
+            const let value = operand(node.data.inputs.left);
+            if (!value)
+              return failure(value.error(), i);
+            if (const let status = output.mov(location, *value))
+              return failure(status, i);
+          }
+          continue;
+        }
         if (node.op == ir::opcode::read_cop0 ||
             node.op == ir::opcode::read_cop0_64) {
           uses_cop0 = true;
@@ -965,6 +1006,8 @@ public:
         case ir::opcode::cache_index:
         case ir::opcode::exception_return:
         case ir::opcode::syscall:
+        case ir::opcode::read_cop1_64:
+        case ir::opcode::write_cop1_64:
         case ir::opcode::read_cop0_64:
         case ir::opcode::write_cop0_64:
         case ir::opcode::read_cop0:
@@ -1034,9 +1077,14 @@ public:
       compiled_block::entry_point entry = nullptr;
       if (const let status = runtime_->add(&entry, &code))
         return failure(status, block.nodes().size());
-      return compiled_block{
-          runtime_,  entry,     block.info().state_slots, uses_memory,
-          uses_cop0, uses_hilo, block.branch_pc()};
+      return compiled_block{runtime_,
+                            entry,
+                            block.info().state_slots,
+                            uses_memory,
+                            uses_cop0,
+                            uses_hilo,
+                            uses_cop1,
+                            block.branch_pc()};
     } catch (const std::bad_alloc &) {
       return std::unexpected(error{error_code::out_of_memory});
     }

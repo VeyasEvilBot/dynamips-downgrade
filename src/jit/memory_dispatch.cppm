@@ -70,8 +70,8 @@ public:
         result.reason = stop_reason::budget_exhausted;
         return result;
       }
-      const let executed =
-          entry.code->run(state.registers, memory_, &state.cop0, &state.hilo);
+      const let executed = entry.code->run(
+          state.registers, memory_, &state.cop0, &state.hilo, &state.cop1);
       if (!executed) {
         state.pc.value = executed.error().pc;
         return std::unexpected(dispatch_error{

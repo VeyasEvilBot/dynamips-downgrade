@@ -126,11 +126,16 @@ private:
   }
 };
 
+struct cop1_state {
+  std::array<std::uint64_t, 32> registers{};
+};
+
 struct state {
   std::array<std::uint64_t, 32> registers{};
   guest_address pc{};
   cop0_state cop0{};
   hilo_state hilo{};
+  cop1_state cop1{};
 
   fn print() const -> void {
     std::println("; native execution, PC={:#x}", pc.value);
@@ -253,6 +258,8 @@ struct error {
     const bool slt = opcode == 0 && function == 0x2a;
     const bool sltu = opcode == 0 && function == 0x2b;
     const bool addu = opcode == 0 && function == 0x21;
+    const bool dmfc1 = opcode == 0x11 && rs == 1;
+    const bool dmtc1 = opcode == 0x11 && rs == 5;
     const bool mfc0 = opcode == 0x10 && (rs == 0 || rs == 1);
     const bool mtc0 = opcode == 0x10 && (rs == 4 || rs == 5);
     const bool lui = opcode == 0x0f;
@@ -274,17 +281,17 @@ struct error {
     const bool jump = opcode == 2 || opcode == 3;
     const bool indirect = opcode == 0 && (function == 8 || function == 9);
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !sync &&
-        !tlb_operation && !eret && !cache && !hilo_read && !hilo_write &&
-        !addu && !subu && !slt && !sltu && !variable_shift && !nor &&
-        !hilo_arithmetic &&
+        !mtc0 && !mfc0 && !dmfc1 && !dmtc1 && !word_shift && !double_shift &&
+        !syscall && !sync && !tlb_operation && !eret && !cache && !hilo_read &&
+        !hilo_write && !addu && !subu && !slt && !sltu && !variable_shift &&
+        !nor && !hilo_arithmetic &&
         !(opcode == 0 && (function == 0x24 || function == 0x25 ||
                           function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !sync &&
-        !tlb_operation && !eret && !cache && !hilo_read && !hilo_write &&
-        ((bits >> 6) & 31) != 0)
+        !mtc0 && !mfc0 && !dmfc1 && !dmtc1 && !word_shift && !double_shift &&
+        !syscall && !sync && !tlb_operation && !eret && !cache && !hilo_read &&
+        !hilo_write && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((hilo_read && (rs != 0 || rt != 0 || ((bits >> 6) & 31) != 0)) ||
         (hilo_write && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0)))
@@ -296,6 +303,8 @@ struct error {
     if (hilo_arithmetic && (rd != 0 || ((bits >> 6) & 31) != 0))
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((word_shift || double_shift) && rs != 0)
+      return std::unexpected(error{error_code::invalid_encoding, i});
+    if ((dmfc1 || dmtc1) && (bits & 0x7ff) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((mtc0 || mfc0) &&
         ((bits & 0x7ff) != 0 ||
@@ -310,10 +319,11 @@ struct error {
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (lui && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
-    const let destination = mfc0 || immediate || memory_access ? rt : rd;
+    const let destination =
+        dmfc1 || mfc0 || immediate || memory_access ? rt : rd;
     if (destination == 0 && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !syscall && !sync && !tlb_operation && !eret && !cache &&
-        !hilo_write && !addi && !hilo_arithmetic)
+        !mtc0 && !dmtc1 && !syscall && !sync && !tlb_operation && !eret &&
+        !cache && !hilo_write && !addi && !hilo_arithmetic)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -500,6 +510,26 @@ struct error {
           !written)
         return failed(written.error());
       registers[rd] = *value;
+      continue;
+    }
+    if (dmfc1 || dmtc1) {
+      if (dmfc1) {
+        const let value = result.append(ir::node::read_cop1_64({rd}, source));
+        if (!value)
+          return failed(value.error());
+        if (let written = result.append(ir::node::write({rt}, *value, source));
+            !written)
+          return failed(written.error());
+        registers[rt] = *value;
+      } else {
+        const let value = read(rt);
+        if (!value)
+          return failed(value.error());
+        if (let written =
+                result.append(ir::node::write_cop1_64({rd}, *value, source));
+            !written)
+          return failed(written.error());
+      }
       continue;
     }
     if (mfc0) {

@@ -1386,6 +1386,40 @@ fn memory_barriers() -> void {
           "guest stores complete before loads across SYNC");
 }
 
+fn cop1_transfers() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create COP1 transfer compiler");
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 0);
+  require(memory.has_value(), "create COP1 execution memory");
+  for (unsigned slot = 0; slot < 32; slot++) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{0x44a10000u | (slot << 11)},
+                           mips::instruction_word{0x44220000u | (slot << 11)},
+                           mips::instruction_word{0x44a00000u | (slot << 11)},
+                           mips::instruction_word{0x44230000u | (slot << 11)}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block.has_value(), "translate DMTC1/DMFC1");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile DMTC1/DMFC1");
+    std::array<std::uint64_t, 32> registers{};
+    registers[1] = 0xfedcba9887654321ULL;
+    const let absent = native->run(registers, **memory);
+    require(!absent && absent.error().code == amd64::error_code::cop1_required,
+            "COP1 transfers reject absent register state");
+    mips::cop1_state cop1;
+    require(
+        native->run(registers, **memory, nullptr, nullptr, &cop1).has_value() &&
+            registers[2] == registers[1] && registers[3] == 0 &&
+            cop1.registers[slot] == 0,
+        "COP1 transfers preserve all 64 bits and allow writes from r0 in every "
+        "slot");
+  }
+}
+
 fn merged_doubleword_loads() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -2397,6 +2431,7 @@ fn main(int argc, char **argv) -> int {
   architectural_tlb();
   prefetch_hints();
   memory_barriers();
+  cop1_transfers();
   merged_doubleword_loads();
   indexed_cache_maintenance();
   hilo_arithmetic();
