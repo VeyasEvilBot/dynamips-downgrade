@@ -37,6 +37,7 @@ struct state_slot {
 enum class width : std::uint8_t { bits32 = 32, bits64 = 64 };
 enum class opcode : std::uint8_t {
   syscall,
+  cache_index,
   exception_return,
   constant,
   read_hilo,
@@ -80,12 +81,12 @@ enum class opcode : std::uint8_t {
 };
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
-  return op != opcode::multiply32 && op != opcode::divide_unsigned32 &&
-         op != opcode::exception_return && op != opcode::write_hilo &&
-         op != opcode::syscall && op != opcode::write_cop0_64 &&
-         op != opcode::write_cop0 && op != opcode::write_state &&
-         op != opcode::store16 && op != opcode::store8 &&
-         op != opcode::store32 && op != opcode::store64;
+  return op != opcode::cache_index && op != opcode::multiply32 &&
+         op != opcode::divide_unsigned32 && op != opcode::exception_return &&
+         op != opcode::write_hilo && op != opcode::syscall &&
+         op != opcode::write_cop0_64 && op != opcode::write_cop0 &&
+         op != opcode::write_state && op != opcode::store16 &&
+         op != opcode::store8 && op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t {
@@ -123,6 +124,15 @@ struct node {
   state_slot slot;
   opcode op;
   width type;
+
+  static constexpr fn cache_index(std::uint32_t operation,
+                                   std::uint32_t source) noexcept -> node {
+    return {{.immediate = operation},
+            source,
+            {},
+            opcode::cache_index,
+            width::bits64};
+  }
 
   static constexpr fn exception_return(std::uint32_t source) noexcept -> node {
     return {
@@ -623,6 +633,12 @@ private:
              nodes_[input.index].type == current.type;
     };
     switch (current.op) {
+    case opcode::cache_index:
+      if (current.type != width::bits64)
+        return fail(error_code::invalid_type);
+      if (current.data.immediate > 1)
+        return fail(error_code::invalid_operand);
+      break;
     case opcode::exception_return:
     case opcode::syscall:
       if (current.type != width::bits64)
@@ -749,6 +765,12 @@ private:
       const let &current = nodes_[i];
       const let bits = static_cast<unsigned>(current.type);
       switch (current.op) {
+      case opcode::cache_index:
+        out = std::format_to(out, "  cache.index.{}",
+                             current.data.immediate == 0
+                                 ? "invalidate.i"
+                                 : "writeback.invalidate.d");
+        break;
       case opcode::exception_return:
         out = std::format_to(out, "  return.exception");
         break;

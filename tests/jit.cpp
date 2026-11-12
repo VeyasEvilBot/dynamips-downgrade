@@ -1173,6 +1173,36 @@ fn branch_likely() -> void {
   }
 }
 
+fn indexed_cache_maintenance() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create cache maintenance compiler");
+  for (const std::uint32_t operation : {0u, 1u}) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{
+        mips::instruction_word{0x34020007},
+        mips::instruction_word{0xbc20ffffu | (operation << 16)},
+        mips::instruction_word{0x34020009}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block && block->info().instruction_count == 2 &&
+                ir::optimize(*block, ir::fold_constants).has_value(),
+            "indexed cache maintenance forms an explicit block boundary");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile indexed cache maintenance");
+    std::array<std::uint64_t, 32> state{};
+    state[1] = UINT64_MAX;
+    const let result = native->run(state);
+    require(result && *result == 0x1008 && state[2] == 7 &&
+                state[1] == UINT64_MAX,
+            "indexed maintenance requires no mapped address and preserves "
+            "registers");
+    const std::array unsupported{mips::instruction_word{0xbd100000}};
+    require(!mips::translate(unsupported, {0x1000}, arena),
+            "hit and tag cache operations require their own modeled semantics");
+  }
+}
+
 fn hilo_arithmetic() -> void {
   namespace mem = jit::memory;
 
@@ -1491,6 +1521,20 @@ fn writable_code_dispatch() -> void {
   const let cached = (*dispatch)->run_slice(state, 1);
   require(cached && cached->compiled == 0 && state.registers[3] == 9,
           "unchanged code reuses its native block");
+  constexpr std::array maintenance{0xbd210001u, 0xbd200000u, 0x08000408u, 0u};
+  for (std::size_t i = 0; i < maintenance.size(); i++)
+    require((*memory)
+                ->store<std::uint32_t>({0x1040 + i * 4}, maintenance[i])
+                .has_value(),
+            "install indexed cache maintenance sequence");
+  require((*memory)->store<std::uint32_t>({0x3020}, 0x3403000b).has_value(),
+          "modify warmed code through an alias before cache maintenance");
+  state.pc = {0x1040};
+  const let maintained = (*dispatch)->run_slice(state, 100);
+  require(!maintained && maintained.error().pc == 0x1024 &&
+              state.registers[3] == 11,
+          "D writeback and I invalidation publish modified code without "
+          "discarding RAM");
   require(
       (*memory)
           ->protect({0x1000}, mem::permission::read | mem::permission::write)
@@ -1973,6 +2017,7 @@ fn main(int argc, char **argv) -> int {
   sign_branches();
   branches_and_dispatch();
   branch_likely();
+  indexed_cache_maintenance();
   hilo_arithmetic();
   hilo_transfers();
   checked_addition();

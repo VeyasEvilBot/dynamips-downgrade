@@ -394,6 +394,10 @@ public:
             return failure(status, i);
           guarded_slot = true;
         }
+        // RAM is coherent and dispatch validates executable bytes before reuse.
+        // Indexed I/D maintenance has no deferred cache state to publish.
+        if (node.op == ir::opcode::cache_index)
+          continue;
         if (node.op == ir::opcode::constant)
           continue;
         if (node.op == ir::opcode::load16_signed ||
@@ -807,6 +811,7 @@ public:
         case ir::opcode::read_hilo:
         case ir::opcode::write_hilo:
         case ir::opcode::add_checked32:
+        case ir::opcode::cache_index:
         case ir::opcode::exception_return:
         case ir::opcode::syscall:
         case ir::opcode::read_cop0_64:
