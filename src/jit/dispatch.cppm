@@ -186,7 +186,7 @@ public:
         return result;
       }
       const let executed =
-          entry.code->run(state.registers, memory_, &state.cop0);
+          entry.code->run(state.registers, memory_, &state.cop0, &state.hilo);
       if (!executed) {
         state.pc.value = executed.error().pc;
         return std::unexpected(dispatch_error{dispatch_error_code::memory,

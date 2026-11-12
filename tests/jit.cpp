@@ -798,6 +798,47 @@ fn branch_likely() -> void {
   }
 }
 
+fn hilo_transfers() -> void {
+  namespace mem = jit::memory;
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{
+      mips::instruction_word{0x00200011}, mips::instruction_word{0x00400013},
+      mips::instruction_word{0x00001810}, mips::instruction_word{0x00002012},
+      mips::instruction_word{0x00000011}, mips::instruction_word{0x00000013},
+      mips::instruction_word{0x00002810}, mips::instruction_word{0x00003012}};
+  let block = mips::translate(words, {0x1000}, arena);
+  let compiler = amd64::compiler::create();
+  require(block && compiler, "prepare HI/LO transfers");
+  require(ir::optimize(*block, ir::fold_constants).has_value(),
+          "optimize HI/LO transfers");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile HI/LO transfers");
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(memory.has_value(), "create HI/LO execution memory");
+  std::array<std::uint64_t, 32> state{};
+  state[1] = 0xfedcba9876543210ULL;
+  state[2] = 0x0123456789abcdefULL;
+  mips::hilo_state hilo{};
+  const let absent = native->run(state, **memory);
+  require(!absent && absent.error().code == amd64::error_code::hilo_required,
+          "reject missing HI/LO state");
+  require(
+      native->run(state, **memory, nullptr, &hilo).has_value() &&
+          state[3] == state[1] && state[4] == state[2] && state[5] == 0 &&
+          state[6] == 0 && hilo.registers[0] == 0 && hilo.registers[1] == 0,
+      "HI/LO transfers retain full-width values and accept the zero register");
+  for (const std::uint32_t invalid : {0x00201810u, 0x00210011u}) {
+    const std::array bad{mips::instruction_word{invalid}};
+    const let rejected = mips::translate(bad, {0x1000}, arena);
+    require(!rejected &&
+                rejected.error().code == mips::error_code::invalid_encoding,
+            "HI/LO transfers validate reserved register fields");
+  }
+}
+
 fn syscall_exceptions() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -1372,6 +1413,7 @@ fn main(int argc, char **argv) -> int {
   example_program();
   branches_and_dispatch();
   branch_likely();
+  hilo_transfers();
   syscall_exceptions();
   writable_code_dispatch();
   handoff_boundary();

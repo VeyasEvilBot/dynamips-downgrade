@@ -38,6 +38,8 @@ enum class width : std::uint8_t { bits32 = 32, bits64 = 64 };
 enum class opcode : std::uint8_t {
   syscall,
   constant,
+  read_hilo,
+  write_hilo,
   read_state,
   shift_right_arithmetic32,
   shift_right32,
@@ -60,9 +62,9 @@ enum class opcode : std::uint8_t {
 };
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
-  return op != opcode::syscall && op != opcode::write_cop0 &&
-         op != opcode::write_state && op != opcode::store8 &&
-         op != opcode::store32 && op != opcode::store64;
+  return op != opcode::write_hilo && op != opcode::syscall &&
+         op != opcode::write_cop0 && op != opcode::write_state &&
+         op != opcode::store8 && op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t {
@@ -104,6 +106,20 @@ struct node {
   static constexpr fn constant(std::uint64_t bits, std::uint32_t source,
                                 width type = width::bits64) noexcept -> node {
     return {{.immediate = bits}, source, {}, opcode::constant, type};
+  }
+
+  static constexpr fn read_hilo(state_slot slot, std::uint32_t source) noexcept
+      -> node {
+    return {{.immediate = 0}, source, slot, opcode::read_hilo, width::bits64};
+  }
+
+  static constexpr fn write_hilo(state_slot slot, value_id value,
+                                  std::uint32_t source) noexcept -> node {
+    return {{.inputs = {value, {}}},
+            source,
+            slot,
+            opcode::write_hilo,
+            width::bits64};
   }
 
   static constexpr fn read(state_slot slot, std::uint32_t source) noexcept
@@ -462,6 +478,16 @@ private:
           current.data.immediate > std::numeric_limits<std::uint32_t>::max())
         return fail(error_code::invalid_operand);
       break;
+    case opcode::read_hilo:
+    case opcode::write_hilo:
+      if (current.slot.index > 1)
+        return fail(error_code::invalid_slot);
+      if (current.type != width::bits64)
+        return fail(error_code::invalid_type);
+      if (current.op == opcode::write_hilo &&
+          !operand_valid(current.data.inputs.left))
+        return fail(error_code::invalid_operand);
+      break;
     case opcode::read_cop0:
     case opcode::write_cop0:
       if (current.slot.index != 9 && current.slot.index != 11 &&
@@ -564,6 +590,15 @@ private:
       case opcode::read_state:
         out = std::format_to(out, "  %v{} = state.read i64 %state, {}", i,
                              current.slot.index);
+        break;
+      case opcode::read_hilo:
+        out = std::format_to(out, "  %v{} = {}.read i64", i,
+                             current.slot.index == 0 ? "hi" : "lo");
+        break;
+      case opcode::write_hilo:
+        out = std::format_to(out, "  {}.write i64 %v{}",
+                             current.slot.index == 0 ? "hi" : "lo",
+                             current.data.inputs.left.index);
         break;
       case opcode::read_cop0:
         out = std::format_to(out, "  %v{} = cop0.read.s32 {}", i,
