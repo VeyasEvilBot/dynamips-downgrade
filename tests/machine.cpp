@@ -22,6 +22,7 @@
 
 import devices.byte_memory;
 import devices.c7200_midplane;
+import devices.gt64120;
 import devices.c7200_iofpga;
 import devices.rom_services;
 import machine.firmware;
@@ -181,6 +182,74 @@ fn rom_contract() -> bool {
           memory.fetch<std::uint32_t>({0x2000}) == 0 &&
           memory.seal_executable_pages().has_value(),
       "ROM is executable but cannot gain write permission through an alias");
+}
+
+fn controller_configuration() -> bool {
+  dynamips::devices::gt64120 controller{{0x14000000}};
+  jit::devices::bus bus;
+  if (!check(bus.add({{0x14000000}, mem::page_size}, controller.descriptor())
+                 .has_value(),
+             "attach system controller"))
+    return false;
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  if (!check(memory && (*memory)
+                           ->map_device({0x4000}, {0x14000000}, bus.endpoint(),
+                                        mem::permission::read |
+                                            mem::permission::write)
+                           .has_value(),
+             "map little-endian controller into big-endian guest"))
+    return false;
+  const let write_address = [&](std::uint64_t offset, std::uint32_t value) {
+    return (*memory)->store<std::uint32_t>({0x4000 + offset},
+                                           std::byteswap(value));
+  };
+  if (!check((*memory)->load<std::uint32_t>({0x4c00}) == 0x01800000 &&
+                 write_address(0x000, 0xffffffff).has_value() &&
+                 (*memory)->load<std::uint32_t>({0x4000}) == 0 &&
+                 write_address(0x864, 0).has_value() &&
+                 (*memory)->load<std::uint32_t>({0x4864}) == 0 &&
+                 !write_address(0x864, 1) &&
+                 (*memory)->load<std::uint32_t>({0x4020}) == 0x7f000000 &&
+                 write_address(0xcf8, 0x80000000).has_value() &&
+                 (*memory)->load<std::uint32_t>({0x4cfc}) == 0xab112046 &&
+                 write_address(0xcf8, 0x80000008).has_value() &&
+                 (*memory)->load<std::uint32_t>({0x4cfc}) == 0x05800003,
+             "GT64120 startup and PCI identity registers preserve legacy byte "
+             "order"))
+    return false;
+  if (!check(write_address(0xcf8, 0x80000800).has_value() &&
+                 (*memory)->load<std::uint32_t>({0x4cfc}) == 0xffffffff &&
+                 write_address(0xcf0, 0x80000000).has_value() &&
+                 (*memory)->load<std::uint32_t>({0x4cf4}) == 0xffffffff &&
+                 (*memory)->load<std::uint32_t>({0x4cf8}) ==
+                     std::byteswap(0x80000800u),
+             "empty PCI slots return absent IDs with independent configuration "
+             "addresses"))
+    return false;
+  if (!check(
+          write_address(0xc1c, 0x12345678).has_value() &&
+              (*memory)->load<std::uint32_t>({0x4c1c}) == 0x78563412 &&
+              (*memory)->load<std::uint32_t>({0x4c18}) == 0 &&
+              !(*memory)->load<std::uint32_t>({0x4840}),
+          "interrupt mask retains state while unsupported DMA registers fault"))
+    return false;
+  for (const std::uint64_t offset :
+       {0x48ULL,  0x50ULL,  0x58ULL,  0x60ULL,  0x80ULL,  0x88ULL,  0x90ULL,
+        0x98ULL,  0xa0ULL,  0xa8ULL,  0xb0ULL,  0xb8ULL,  0xc04ULL, 0xc10ULL,
+        0xc14ULL, 0xc24ULL, 0xc3cULL, 0xc40ULL, 0xc48ULL, 0xc58ULL, 0xc80ULL,
+        0xc84ULL, 0xc88ULL, 0xc8cULL, 0xc90ULL, 0xc94ULL, 0xca4ULL, 0xcbcULL,
+        0xcc0ULL, 0xcc8ULL, 0xcd8ULL}) {
+    if (!check(
+            write_address(offset, 0x12345678).has_value() &&
+                (*memory)->load<std::uint32_t>({0x4000 + offset}) == 0,
+            "controller decode-window setup matches legacy inactive windows"))
+      return false;
+  }
+  bus.reset();
+  return check((*memory)->load<std::uint32_t>({0x4c1c}) == 0 &&
+                   (*memory)->load<std::uint32_t>({0x4cf8}) == 0,
+               "controller reset restores masks and configuration selectors");
 }
 
 fn empty_port_adapters() -> bool {
@@ -978,6 +1047,8 @@ fn main(int argc, char **argv) -> int {
                      probe.context,
                      {{0x1e8403a2}, std::endian::big, mem::access_size::half}),
              "NPE-400 board probe reads zero; unknown registers fault"))
+    return 1;
+  if (!controller_configuration())
     return 1;
   if (!empty_port_adapters())
     return 1;

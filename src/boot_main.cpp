@@ -20,6 +20,7 @@
 
 import devices.byte_memory;
 import devices.c7200_midplane;
+import devices.gt64120;
 import devices.c7200_iofpga;
 import devices.rom_services;
 import machine.firmware;
@@ -125,7 +126,9 @@ fn run(const char *rom_path, const char *ios_path,
   dynamips::devices::c7200_midplane midplane;
   dynamips::devices::c7200_iofpga io{dynamips::c7200::npe400_eeprom,
                                      dynamips::c7200::vxr_eeprom};
+  dynamips::devices::gt64120 controller{{0x14000000}};
   const std::array attachments{
+      machine::attachment{dynamips::c7200::gt64120, controller.descriptor()},
       machine::attachment{dynamips::c7200::rom_services, services.descriptor()},
       machine::attachment{dynamips::c7200::nvram, nvram.descriptor()},
       machine::attachment{dynamips::c7200::midplane_fpga,
