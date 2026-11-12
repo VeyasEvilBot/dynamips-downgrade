@@ -40,6 +40,7 @@ enum class opcode : std::uint8_t {
   cache_index,
   exception_return,
   constant,
+  alias,
   read_hilo,
   write_hilo,
   multiply32,
@@ -124,6 +125,11 @@ struct node {
   state_slot slot;
   opcode op;
   width type;
+
+  static constexpr fn alias(value_id input, std::uint32_t source,
+                             width type = width::bits64) noexcept -> node {
+    return {{.inputs = {input, {}}}, source, {}, opcode::alias, type};
+  }
 
   static constexpr fn cache_index(std::uint32_t operation,
                                    std::uint32_t source) noexcept -> node {
@@ -633,6 +639,10 @@ private:
              nodes_[input.index].type == current.type;
     };
     switch (current.op) {
+    case opcode::alias:
+      if (!operand_valid(current.data.inputs.left))
+        return fail(error_code::invalid_operand);
+      break;
     case opcode::cache_index:
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
@@ -765,6 +775,10 @@ private:
       const let &current = nodes_[i];
       const let bits = static_cast<unsigned>(current.type);
       switch (current.op) {
+      case opcode::alias:
+        out = std::format_to(out, "  %v{} = alias i{} %v{}", i, bits,
+                             current.data.inputs.left.index);
+        break;
       case opcode::cache_index:
         out = std::format_to(out, "  cache.index.{}",
                              current.data.immediate == 0
@@ -929,6 +943,60 @@ private:
     return std::format_to(out, "  ret i64 {}\n}}", next_pc());
   }
 };
+
+[[nodiscard]] fn simplify_identities(block &value) noexcept
+    -> std::expected<std::size_t, error> {
+  if (let valid = value.verify(); !valid)
+    return std::unexpected(valid.error());
+  std::size_t simplified = 0;
+  for (let &current : value.edit_nodes()) {
+    if (current.op != opcode::subtract_wrap && current.op != opcode::add_wrap &&
+        current.op != opcode::bit_or && current.op != opcode::bit_xor &&
+        current.op != opcode::bit_and && current.op != opcode::signed_less &&
+        current.op != opcode::unsigned_less)
+      continue;
+    const let &left = value.nodes()[current.data.inputs.left.index];
+    const let &right = value.nodes()[current.data.inputs.right.index];
+    if (left.op == opcode::constant && right.op == opcode::constant)
+      continue;
+    const let same =
+        current.data.inputs.left.index == current.data.inputs.right.index;
+    if (same &&
+        (current.op == opcode::subtract_wrap || current.op == opcode::bit_xor ||
+         current.op == opcode::unsigned_less ||
+         current.op == opcode::signed_less)) {
+      current = node::constant(0, current.source_index, current.type);
+      simplified++;
+      continue;
+    }
+    let input = current.data.inputs.left;
+    const node *constant = &right;
+    if (left.op == opcode::constant &&
+        (current.op == opcode::add_wrap || current.op == opcode::bit_or ||
+         current.op == opcode::bit_xor || current.op == opcode::bit_and)) {
+      input = current.data.inputs.right;
+      constant = &left;
+    }
+    const let mask = current.type == width::bits64 ? UINT64_MAX : UINT32_MAX;
+    if ((same &&
+         (current.op == opcode::bit_and || current.op == opcode::bit_or)) ||
+        (constant->op == opcode::constant &&
+         ((constant->data.immediate == 0 &&
+           (current.op == opcode::add_wrap ||
+            current.op == opcode::subtract_wrap ||
+            current.op == opcode::bit_or || current.op == opcode::bit_xor)) ||
+          (constant->data.immediate == mask &&
+           current.op == opcode::bit_and)))) {
+      current = node::alias(input, current.source_index, current.type);
+      simplified++;
+    } else if (constant->op == opcode::constant &&
+               constant->data.immediate == 0 && current.op == opcode::bit_and) {
+      current = node::constant(0, current.source_index, current.type);
+      simplified++;
+    }
+  }
+  return simplified;
+}
 
 [[nodiscard]] fn fold_constants(block &value) noexcept
     -> std::expected<std::size_t, error> {

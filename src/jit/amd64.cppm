@@ -298,6 +298,7 @@ public:
           keep_store[i - 1] = observed[node.slot.index];
           observed[node.slot.index] = 0;
           break;
+        case ir::opcode::alias:
         case ir::opcode::constant:
         case ir::opcode::shift_left64:
         case ir::opcode::shift_right64:
@@ -393,6 +394,13 @@ public:
                                      : output.je(annulled))
             return failure(status, i);
           guarded_slot = true;
+        }
+        if (node.op == ir::opcode::alias) {
+          const let input = operand(node.data.inputs.left);
+          if (!input)
+            return failure(input.error(), i);
+          values[i] = *input;
+          continue;
         }
         // RAM is coherent and dispatch validates executable bytes before reuse.
         // Indexed I/D maintenance has no deferred cache state to publish.
@@ -678,6 +686,7 @@ public:
         values[i] = result;
         asmjit::Error status = asmjit::kErrorOk;
         switch (node.op) {
+        case ir::opcode::alias:
         case ir::opcode::constant:
           break;
         case ir::opcode::shift_left32_variable:

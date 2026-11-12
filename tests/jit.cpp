@@ -144,8 +144,10 @@ fn differential() -> void {
     require(block.has_value(), "translate generated instructions");
     for (unsigned pass = 0; pass < 2; pass++) {
       if (pass == 1)
-        require(ir::optimize(*block, ir::fold_constants).has_value(),
-                "optimize generated IR");
+        require(
+            ir::optimize(*block, ir::fold_constants, ir::simplify_identities)
+                .has_value(),
+            "optimize generated IR");
       alignas(std::max_align_t) std::array<std::byte, 64 * 1024> scratch;
       std::pmr::monotonic_buffer_resource native_memory{
           scratch.data(), scratch.size(), std::pmr::null_memory_resource()};
@@ -424,7 +426,8 @@ fn mmio_console() -> void {
       mips::instruction_word{0x8c850000}};
   let block = mips::translate(words, {0x1000}, arena);
   require(block.has_value() &&
-              ir::optimize(*block, ir::fold_constants).has_value(),
+              ir::optimize(*block, ir::fold_constants, ir::simplify_identities)
+                  .has_value(),
           "translate and optimize MMIO program");
   let native = compiler->compile(*block, arena);
   require(native.has_value(), "compile MMIO program");
@@ -444,7 +447,9 @@ fn mmio_console() -> void {
       mips::instruction_word{0x34020059}, mips::instruction_word{0xac220000}};
   let fault_block = mips::translate(faulting, {0x1000}, arena);
   require(fault_block.has_value() &&
-              ir::optimize(*fault_block, ir::fold_constants).has_value(),
+              ir::optimize(*fault_block, ir::fold_constants,
+                           ir::simplify_identities)
+                  .has_value(),
           "translate faulting MMIO program");
   let fault_native = compiler->compile(*fault_block, arena);
   require(fault_native.has_value(), "compile faulting MMIO program");
@@ -1170,6 +1175,55 @@ fn branch_likely() -> void {
                   "not taken");
       }
     }
+  }
+}
+
+fn algebraic_register_identities() -> void {
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  let block = ir::block::create({0x1000, 1, 32}, 16, arena);
+  require(block.has_value(), "create identity IR");
+  const let input = block->append(ir::node::read({1}, 0));
+  const let zero = block->append(ir::node::constant(0, 0));
+  const let mask = block->append(ir::node::constant(UINT64_MAX, 0));
+  require(input && zero && mask, "append identity inputs");
+  const let add = block->append(
+      ir::node::binary(ir::binary_kind::add_wrap, *input, *zero, 0));
+  const let subtract = block->append(
+      ir::node::binary(ir::binary_kind::subtract_wrap, *zero, *input, 0));
+  const let bit_and = block->append(
+      ir::node::binary(ir::binary_kind::bit_and, *input, *mask, 0));
+  const let bit_xor = block->append(
+      ir::node::binary(ir::binary_kind::bit_xor, *input, *input, 0));
+  require(add && subtract && bit_and && bit_xor &&
+              block->append(ir::node::write({3}, *add, 0)).has_value() &&
+              block->append(ir::node::write({4}, *subtract, 0)).has_value() &&
+              block->append(ir::node::write({5}, *bit_and, 0)).has_value() &&
+              block->append(ir::node::write({6}, *bit_xor, 0)).has_value(),
+          "append identity operations");
+  require(
+      ir::optimize(*block, ir::fold_constants, ir::simplify_identities)
+              .has_value() &&
+          block->nodes()[add->index].op == ir::opcode::alias &&
+          block->nodes()[bit_and->index].op == ir::opcode::alias &&
+          block->nodes()[subtract->index].op == ir::opcode::subtract_wrap &&
+          block->nodes()[bit_xor->index].op == ir::opcode::constant &&
+          std::format("{}", *block).find("alias i64") != std::string::npos,
+      "print and verify aliases while retaining noncommutative subtraction");
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create identity compiler");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile value aliases");
+  for (const std::uint64_t bits :
+       {0ULL, 1ULL, 0x8000000000000000ULL, 0x1234567887654321ULL,
+        0xffffffffffffffffULL}) {
+    std::array<std::uint64_t, 32> state{};
+    state[1] = bits;
+    require(native->run(state).has_value() && state[1] == bits &&
+                state[3] == bits && state[4] == 0 - bits && state[5] == bits &&
+                state[6] == 0,
+            "native aliases preserve full-width SSA values and register state");
   }
 }
 
@@ -2068,6 +2122,7 @@ fn main(int argc, char **argv) -> int {
   sign_branches();
   branches_and_dispatch();
   branch_likely();
+  algebraic_register_identities();
   indexed_cache_maintenance();
   hilo_arithmetic();
   hilo_transfers();

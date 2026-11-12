@@ -73,7 +73,9 @@ compile_native_block(std::span<const mips64::instruction_word> words,
                        start.value + translated.error().instruction_index * 4,
                        {},
                        translated.error()});
-  if (let optimized = ir::optimize(*translated, ir::fold_constants);
+  if (let optimized =
+          ir::optimize(*translated, ir::fold_constants, ir::simplify_identities,
+                       ir::fold_constants);
       !optimized)
     return std::unexpected(
         dispatch_error{dispatch_error_code::translation, start.value});
