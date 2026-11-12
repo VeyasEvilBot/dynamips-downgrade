@@ -53,6 +53,7 @@ enum class opcode : std::uint8_t {
   signed_less,
   add_wrap,
   subtract_wrap,
+  add_checked32,
   bit_and,
   bit_or,
   bit_xor,
@@ -206,6 +207,15 @@ struct node {
             source,
             {},
             opcode::sign_extend32,
+            width::bits64};
+  }
+
+  static constexpr fn add_checked32(value_id left, value_id right,
+                                     std::uint32_t source) noexcept -> node {
+    return {{.inputs = {left, right}},
+            source,
+            {},
+            opcode::add_checked32,
             width::bits64};
   }
 
@@ -609,6 +619,7 @@ private:
       if (!operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::add_checked32:
     case opcode::unsigned_less:
     case opcode::signed_less:
       if (current.type != width::bits64)
@@ -740,6 +751,11 @@ private:
         break;
       case opcode::unsigned_less:
       case opcode::signed_less:
+      case opcode::add_checked32:
+        out = std::format_to(out, "  %v{} = add.i32.checked.sext %v{}, %v{}", i,
+                             current.data.inputs.left.index,
+                             current.data.inputs.right.index);
+        break;
       case opcode::subtract_wrap:
       case opcode::add_wrap:
       case opcode::bit_and:

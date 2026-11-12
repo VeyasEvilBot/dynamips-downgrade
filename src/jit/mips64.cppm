@@ -51,10 +51,11 @@ constexpr fn jump_target(instruction_word word, guest_address pc) noexcept
 struct cop0_state {
   std::array<std::uint64_t, 32> registers{};
 
-  fn syscall(guest_address pc, bool delay_slot) noexcept -> guest_address {
+  fn exception(std::uint32_t code, guest_address pc, bool delay_slot) noexcept
+      -> guest_address {
     let &status = registers[12];
     let &cause = registers[13];
-    cause = (cause & ~std::uint64_t{0x7c}) | (8u << 2);
+    cause = (cause & ~std::uint64_t{0x7c}) | (std::uint64_t{code} << 2);
     if (!(status & 2)) {
       registers[14] = pc.value;
       cause = (cause & ~(std::uint64_t{1} << 31)) |
@@ -195,9 +196,10 @@ struct error {
     const bool sltiu = opcode == 0x0b;
     const bool slti = opcode == 0x0a;
     const bool daddiu = opcode == 0x19;
+    const bool addi = opcode == 0x08;
     const bool addiu = opcode == 0x09;
     const bool immediate = opcode == 0x0c || opcode == 0x0d || opcode == 0x0e ||
-                           lui || addiu || daddiu || slti || sltiu;
+                           lui || addi || addiu || daddiu || slti || sltiu;
     const bool load = opcode == 0x20 || opcode == 0x23 || opcode == 0x37;
     const bool store = opcode == 0x28 || opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
@@ -233,7 +235,7 @@ struct error {
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = mfc0 || immediate || memory_access ? rt : rd;
     if (destination == 0 && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !syscall && !eret && !hilo_write)
+        !mtc0 && !syscall && !eret && !hilo_write && !addi)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -466,7 +468,7 @@ struct error {
     }
     const let right =
         immediate ? result.append(ir::node::constant(
-                        (addiu || daddiu || slti || sltiu)
+                        (addi || addiu || daddiu || slti || sltiu)
                             ? static_cast<std::uint64_t>(std::int64_t{
                                   static_cast<std::int16_t>(bits & 0xffff)})
                             : bits & 0xffff,
@@ -485,10 +487,13 @@ struct error {
                           : function == 0x25  ? ir::binary_kind::bit_or
                           : function == 0x26 ? ir::binary_kind::bit_xor
                                              : ir::binary_kind::add_wrap;
-    let value =
-        result.append(ir::node::binary(operation, *left, *right, source));
+    let value = result.append(
+        addi ? ir::node::add_checked32(*left, *right, source)
+             : ir::node::binary(operation, *left, *right, source));
     if (!value)
       return failed(value.error());
+    if (addi && destination == 0)
+      continue;
     if (addiu || addu || subu) {
       value = result.append(ir::node::sign_extend32(*value, source));
       if (!value)

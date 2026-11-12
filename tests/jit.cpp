@@ -1071,6 +1071,72 @@ fn hilo_transfers() -> void {
   }
 }
 
+fn checked_addition() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create checked addition compiler");
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(memory.has_value(), "create checked addition memory");
+  constexpr std::uint64_t start = 0xffffffff80001000ULL;
+  for (unsigned slot = 0; slot < 3; slot++) {
+    for (const std::uint32_t destination : {0u, 2u}) {
+      for (const std::uint16_t immediate :
+           {std::uint16_t{1}, std::uint16_t{0xffff}}) {
+        alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+        std::pmr::monotonic_buffer_resource arena{
+            storage.data(), storage.size(), std::pmr::null_memory_resource()};
+        const mips::instruction_word add{0x20200000u | (destination << 16) |
+                                         immediate};
+        const std::array words{
+            mips::instruction_word{0x34030007},
+            slot ? mips::instruction_word{slot == 1 ? 0x10000001u : 0x54000001u}
+                 : add,
+            slot ? add : mips::instruction_word{0x34030009},
+            mips::instruction_word{0x34030009}};
+        let block = mips::translate(words, {start}, arena);
+        require(block && ir::optimize(*block, ir::fold_constants).has_value(),
+                "translate and optimize checked addition");
+        let native = compiler->compile(*block, arena);
+        require(native.has_value(), "compile checked addition");
+        for (const std::uint64_t bits :
+             {0ULL, 0x7fffffffULL, 0x80000000ULL, 0xffffffffULL,
+              0x1234567880000000ULL}) {
+          const let sum = std::int64_t{std::bit_cast<std::int32_t>(
+                              static_cast<std::uint32_t>(bits))} +
+                          std::bit_cast<std::int16_t>(immediate);
+          const bool overflow =
+              slot != 2 && (sum > 0x7fffffffLL || sum < -0x80000000LL);
+          std::array<std::uint64_t, 32> state{};
+          state[1] = bits;
+          state[2] = 99;
+          mips::cop0_state cop0;
+          cop0.registers[13] = 0x8000;
+          const let result = native->run(state, **memory, &cop0);
+          require(result && *result == (overflow ? 0xffffffff80000180ULL
+                                                 : block->next_pc()),
+                  "ADDI returns an overflow vector or the ordinary next PC");
+          require(state[0] == 0 &&
+                      state[2] == (overflow || slot == 2 || destination == 0
+                                       ? 99ULL
+                                       : static_cast<std::uint64_t>(sum)) &&
+                      state[3] == (overflow || slot ? 7u : 9u),
+                  "ADDI preserves precise state and traps even when its "
+                  "destination is r0");
+          require(cop0.registers[13] ==
+                          (overflow
+                               ? 0x8030ULL | (slot == 1 ? 0x80000000ULL : 0)
+                               : 0x8000ULL) &&
+                      cop0.registers[12] == (overflow ? 2u : 0u) &&
+                      cop0.registers[14] == (overflow ? start + 4 : 0),
+                  "ADDI overflow sets ExcCode, EXL, EPC and delay-slot BD "
+                  "precisely");
+        }
+      }
+    }
+  }
+}
+
 fn exception_return() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -1697,6 +1763,7 @@ fn main(int argc, char **argv) -> int {
   branches_and_dispatch();
   branch_likely();
   hilo_transfers();
+  checked_addition();
   exception_return();
   syscall_exceptions();
   writable_code_dispatch();

@@ -190,9 +190,14 @@ private:
     return context->cop0->exception_return().value;
   }
 
+  static fn overflow(execution_context *context, std::uint64_t pc,
+                      std::uint32_t delay_slot) noexcept -> std::uint64_t {
+    return context->cop0->exception(12, {pc}, delay_slot != 0).value;
+  }
+
   static fn syscall(execution_context *context, std::uint64_t pc,
                      std::uint32_t delay_slot) noexcept -> std::uint64_t {
-    return context->cop0->syscall({pc}, delay_slot != 0).value;
+    return context->cop0->exception(8, {pc}, delay_slot != 0).value;
   }
 
   static fn write_cop0(execution_context *context, std::uint32_t slot,
@@ -475,6 +480,47 @@ public:
           }
           continue;
         }
+        if (node.op == ir::opcode::add_checked32) {
+          uses_cop0 = true;
+          const let left = operand(node.data.inputs.left);
+          const let right = operand(node.data.inputs.right);
+          if (!left || !right)
+            return failure(!left ? left.error() : right.error(), i);
+          const let result = output.newUInt64();
+          const let vector = output.newUInt64();
+          const let normal = output.newLabel();
+          if (errors.code)
+            return failure(errors.code, i);
+          if (const let status = output.mov(result.r32(), left->r32()))
+            return failure(status, i);
+          if (const let status = output.add(result.r32(), right->r32()))
+            return failure(status, i);
+          if (const let status = output.jno(normal))
+            return failure(status, i);
+          const let branch = block.branch_pc();
+          const bool delay_slot =
+              branch && block.source_pc(node) == *branch + 4;
+          const let pc = delay_slot ? *branch : block.source_pc(node);
+          asmjit::InvokeNode *call = nullptr;
+          if (const let status = output.invoke(
+                  &call, asmjit::Imm{&compiled_block::overflow},
+                  asmjit::FuncSignature::build<
+                      std::uint64_t, compiled_block::execution_context *,
+                      std::uint64_t, std::uint32_t>()))
+            return failure(status, i);
+          call->setArg(0, context);
+          call->setArg(1, asmjit::Imm{pc});
+          call->setArg(2, asmjit::Imm{delay_slot ? 1 : 0});
+          call->setRet(0, vector);
+          if (const let status = output.ret(vector))
+            return failure(status, i);
+          if (const let status = output.bind(normal))
+            return failure(status, i);
+          if (const let status = output.movsxd(result, result.r32()))
+            return failure(status, i);
+          values[i] = result;
+          continue;
+        }
         if (node.op == ir::opcode::exception_return) {
           uses_cop0 = true;
           const let target = output.newUInt64();
@@ -690,6 +736,7 @@ public:
         }
         case ir::opcode::read_hilo:
         case ir::opcode::write_hilo:
+        case ir::opcode::add_checked32:
         case ir::opcode::exception_return:
         case ir::opcode::syscall:
         case ir::opcode::read_cop0_64:
