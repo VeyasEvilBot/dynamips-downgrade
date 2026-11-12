@@ -44,6 +44,9 @@ enum class opcode : std::uint8_t {
   shift_right_arithmetic32,
   shift_right32,
   shift_left32,
+  shift_left64,
+  shift_right64,
+  shift_right_arithmetic64,
   sign_extend32,
   unsigned_less,
   signed_less,
@@ -157,6 +160,35 @@ struct node {
             source,
             {},
             opcode::shift_left32,
+            width::bits64};
+  }
+
+  static constexpr fn shift_left64(value_id value, std::uint32_t amount,
+                                    std::uint32_t source) noexcept -> node {
+    return {{.shift = {value, amount}},
+            source,
+            {},
+            opcode::shift_left64,
+            width::bits64};
+  }
+
+  static constexpr fn shift_right64(value_id value, std::uint32_t amount,
+                                     std::uint32_t source) noexcept -> node {
+    return {{.shift = {value, amount}},
+            source,
+            {},
+            opcode::shift_right64,
+            width::bits64};
+  }
+
+  static constexpr fn shift_right_arithmetic64(value_id value,
+                                                std::uint32_t amount,
+                                                std::uint32_t source) noexcept
+      -> node {
+    return {{.shift = {value, amount}},
+            source,
+            {},
+            opcode::shift_right_arithmetic64,
             width::bits64};
   }
 
@@ -543,6 +575,15 @@ private:
           !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::shift_left64:
+    case opcode::shift_right64:
+    case opcode::shift_right_arithmetic64:
+      if (current.type != width::bits64)
+        return fail(error_code::invalid_type);
+      if (!operand_valid(current.data.shift.value) ||
+          current.data.shift.amount > 63)
+        return fail(error_code::invalid_operand);
+      break;
     case opcode::shift_right_arithmetic32:
     case opcode::shift_left32:
     case opcode::shift_right32:
@@ -608,6 +649,16 @@ private:
       case opcode::constant:
         out = std::format_to(out, "  %v{} = const i{} {}", i, bits,
                              current.data.immediate);
+        break;
+      case opcode::shift_left64:
+      case opcode::shift_right64:
+      case opcode::shift_right_arithmetic64:
+        out = std::format_to(out, "  %v{} = {} %v{}, {}", i,
+                             current.op == opcode::shift_left64    ? "shl.i64"
+                             : current.op == opcode::shift_right64 ? "lshr.i64"
+                                                                   : "ashr.i64",
+                             current.data.shift.value.index,
+                             current.data.shift.amount);
         break;
       case opcode::shift_right_arithmetic32:
       case opcode::shift_left32:
@@ -722,6 +773,24 @@ private:
     return std::unexpected(valid.error());
   std::size_t folded = 0;
   for (let &current : value.edit_nodes()) {
+    if (current.op == opcode::shift_left64 ||
+        current.op == opcode::shift_right64 ||
+        current.op == opcode::shift_right_arithmetic64) {
+      const let &input = value.nodes()[current.data.shift.value.index];
+      if (input.op == opcode::constant) {
+        const let bits = input.data.immediate;
+        const let amount = current.data.shift.amount;
+        const let shifted =
+            current.op == opcode::shift_left64 ? bits << amount
+            : current.op == opcode::shift_right64
+                ? bits >> amount
+                : std::bit_cast<std::uint64_t>(
+                      std::bit_cast<std::int64_t>(bits) >> amount);
+        current = node::constant(shifted, current.source_index);
+        folded++;
+      }
+      continue;
+    }
     if (current.op == opcode::shift_left32 ||
         current.op == opcode::shift_right32 ||
         current.op == opcode::shift_right_arithmetic32) {

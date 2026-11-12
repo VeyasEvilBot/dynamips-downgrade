@@ -276,6 +276,9 @@ public:
           observed[node.slot.index] = 0;
           break;
         case ir::opcode::constant:
+        case ir::opcode::shift_left64:
+        case ir::opcode::shift_right64:
+        case ir::opcode::shift_right_arithmetic64:
         case ir::opcode::shift_right_arithmetic32:
         case ir::opcode::shift_left32:
         case ir::opcode::shift_right32:
@@ -554,6 +557,22 @@ public:
         switch (node.op) {
         case ir::opcode::constant:
           break;
+        case ir::opcode::shift_left64:
+        case ir::opcode::shift_right64:
+        case ir::opcode::shift_right_arithmetic64: {
+          const let input = operand(node.data.shift.value);
+          if (!input)
+            return failure(input.error(), i);
+          status = output.mov(result, *input);
+          if (!status)
+            status =
+                node.op == ir::opcode::shift_left64
+                    ? output.shl(result, asmjit::Imm{node.data.shift.amount})
+                : node.op == ir::opcode::shift_right64
+                    ? output.shr(result, asmjit::Imm{node.data.shift.amount})
+                    : output.sar(result, asmjit::Imm{node.data.shift.amount});
+          break;
+        }
         case ir::opcode::shift_right_arithmetic32:
         case ir::opcode::shift_left32:
         case ir::opcode::shift_right32: {

@@ -509,6 +509,68 @@ fn word_shifts() -> void {
   }
 }
 
+fn doubleword_shifts() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create doubleword shift compiler");
+  for (const std::uint32_t function :
+       {0x38u, 0x3au, 0x3bu, 0x3cu, 0x3eu, 0x3fu}) {
+    for (const std::uint32_t field : {0u, 1u, 31u}) {
+      alignas(std::max_align_t) std::array<std::byte, 32768> storage;
+      std::pmr::monotonic_buffer_resource arena{
+          storage.data(), storage.size(), std::pmr::null_memory_resource()};
+      const std::array words{mips::instruction_word{(1u << 16) | (2u << 11) |
+                                                    (field << 6) | function}};
+      let block = mips::translate(words, {0x1000}, arena);
+      require(block.has_value(), "translate doubleword shift");
+      let native = compiler->compile(*block, arena);
+      require(native.has_value(), "compile doubleword shift");
+      const let amount = field + ((function & 4) ? 32 : 0);
+      for (const std::uint64_t bits :
+           {0ULL, 1ULL, 0x8000000000000000ULL, 0xffffffffffffffffULL,
+            0x1234567887654321ULL}) {
+        const let expected =
+            (function & 3) == 0 ? bits << amount
+            : (function & 3) == 2
+                ? bits >> amount
+                : std::bit_cast<std::uint64_t>(
+                      std::bit_cast<std::int64_t>(bits) >> amount);
+        std::array<std::uint64_t, 32> state{};
+        state[1] = bits;
+        require(
+            native->run(state).has_value() && state[2] == expected,
+            "doubleword shifts preserve all 64 bits and encoded shift counts");
+        let folded = ir::block::create({0x1000, 1, 32}, 3, arena);
+        require(folded.has_value(), "create constant doubleword shift IR");
+        const let input = folded->append(ir::node::constant(bits, 0));
+        require(input.has_value(), "append constant shift input");
+        const let shifted = folded->append(
+            (function & 3) == 0 ? ir::node::shift_left64(*input, amount, 0)
+            : (function & 3) == 2
+                ? ir::node::shift_right64(*input, amount, 0)
+                : ir::node::shift_right_arithmetic64(*input, amount, 0));
+        require(
+            shifted && ir::optimize(*folded, ir::fold_constants).has_value() &&
+                folded->nodes()[shifted->index].op == ir::opcode::constant &&
+                folded->nodes()[shifted->index].data.immediate == expected,
+            "constant folding agrees with doubleword shift execution");
+      }
+    }
+  }
+  alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{mips::instruction_word{0x00221825}};
+  let block = mips::translate(words, {0x1000}, arena);
+  require(block.has_value(), "translate OR");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile OR");
+  std::array<std::uint64_t, 32> state{};
+  state[1] = 0xffffffff80000000ULL;
+  state[2] = 0x123456789abcdef0ULL;
+  require(native->run(state).has_value() && state[3] == (state[1] | state[2]),
+          "OR retains both full-width operands");
+}
+
 fn word_addition() -> void {
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create word addition compiler");
@@ -1531,6 +1593,7 @@ fn main(int argc, char **argv) -> int {
   memory_operations();
   word_shifts();
   word_addition();
+  doubleword_shifts();
   cop0_writes();
   cop0_full_width();
   byte_stores();

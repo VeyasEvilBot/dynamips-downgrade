@@ -169,6 +169,10 @@ struct error {
     const bool syscall = opcode == 0 && function == 0x0c;
     const bool word_shift =
         opcode == 0 && (function == 0 || function == 2 || function == 3);
+    const bool double_shift =
+        opcode == 0 &&
+        (function == 0x38 || function == 0x3a || function == 0x3b ||
+         function == 0x3c || function == 0x3e || function == 0x3f);
     const bool addu = opcode == 0 && function == 0x21;
     const bool mfc0 = opcode == 0x10 && (rs == 0 || rs == 1);
     const bool mtc0 = opcode == 0x10 && (rs == 4 || rs == 5);
@@ -186,19 +190,19 @@ struct error {
     const bool jump = opcode == 2 || opcode == 3;
     const bool indirect = opcode == 0 && (function == 8 || function == 9);
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !word_shift && !syscall && !hilo_read &&
-        !hilo_write && !addu &&
-        !(opcode == 0 &&
-          (function == 0x24 || function == 0x26 || function == 0x2d)))
+        !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall &&
+        !hilo_read && !hilo_write && !addu &&
+        !(opcode == 0 && (function == 0x24 || function == 0x25 ||
+                          function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !word_shift && !syscall && !hilo_read &&
-        !hilo_write && ((bits >> 6) & 31) != 0)
+        !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall &&
+        !hilo_read && !hilo_write && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((hilo_read && (rs != 0 || rt != 0 || ((bits >> 6) & 31) != 0)) ||
         (hilo_write && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0)))
       return std::unexpected(error{error_code::invalid_encoding, i});
-    if (word_shift && rs != 0)
+    if ((word_shift || double_shift) && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((mtc0 || mfc0) &&
         ((bits & 0x7ff) != 0 ||
@@ -288,6 +292,24 @@ struct error {
             !written)
           return failed(written.error());
       }
+      continue;
+    }
+    if (double_shift) {
+      const let input = read(rt);
+      if (!input)
+        return failed(input.error());
+      const let amount = ((bits >> 6) & 31) + ((function & 4) ? 32 : 0);
+      const let value = result.append(
+          (function & 3) == 0 ? ir::node::shift_left64(*input, amount, source)
+          : (function & 3) == 2
+              ? ir::node::shift_right64(*input, amount, source)
+              : ir::node::shift_right_arithmetic64(*input, amount, source));
+      if (!value)
+        return failed(value.error());
+      if (let written = result.append(ir::node::write({rd}, *value, source));
+          !written)
+        return failed(written.error());
+      registers[rd] = *value;
       continue;
     }
     if (word_shift) {
@@ -432,6 +454,7 @@ struct error {
                           : (addiu || daddiu) ? ir::binary_kind::add_wrap
                           : immediate         ? ir::binary_kind::bit_or
                           : function == 0x24  ? ir::binary_kind::bit_and
+                          : function == 0x25  ? ir::binary_kind::bit_or
                           : function == 0x26 ? ir::binary_kind::bit_xor
                                              : ir::binary_kind::add_wrap;
     let value =
