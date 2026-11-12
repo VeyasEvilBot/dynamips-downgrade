@@ -810,6 +810,17 @@ fn cop0_full_width() -> void {
     cop0.registers[slot] = 0xfedcba9881234567ULL;
     require(native->run(state, **memory, &cop0).has_value(),
             "execute full-width CP0 transfers");
+    for (std::size_t position = block->info().instruction_count;
+         position < words.size();) {
+      let tail = mips::translate(std::span{words}.subspan(position),
+                                  {0x1000 + position * 4}, arena);
+      require(tail.has_value(),
+              "translate CP0 transfer after observation boundary");
+      let code = compiler->compile(*tail, arena);
+      require(code && code->run(state, **memory, &cop0).has_value(),
+              "execute CP0 transfer tail");
+      position += tail->info().instruction_count;
+    }
     require(state[0] == 0 && state[2] == 0xfedcba9881234567ULL &&
                 state[3] == 0xffffffff81234567ULL,
             "DMFC0 preserves all bits while MFC0 sign extends the low word");
@@ -1384,6 +1395,100 @@ fn memory_barriers() -> void {
               state.registers[3] == 0xab &&
               (*memory)->load<std::uint32_t>({0x1100}) == 0xab,
           "guest stores complete before loads across SYNC");
+}
+
+fn cp0_clock() -> void {
+  mips::cop0_state cp0;
+  cp0.registers[11] = 3;
+  cp0.advance_cycles(1);
+  require(cp0.registers[9] == 0, "Count preserves half-cycle phase");
+  cp0.advance_cycles(4);
+  require(cp0.registers[9] == 2 && cp0.registers[13] == 0,
+          "Count advances once per two cycles");
+  cp0.advance_cycles(1);
+  require(cp0.registers[9] == 3 && (cp0.registers[13] & 0x8000),
+          "Compare match latches timer pending");
+  cp0.registers[12] = 0x8001;
+  require(cp0.interrupt_pending(), "enabled timer interrupt is visible");
+  cp0.registers[12] |= 2;
+  require(!cp0.interrupt_pending(), "EXL suppresses interrupt entry");
+  cp0.write(11, 1);
+  require(!(cp0.registers[13] & 0x8000),
+          "Compare write acknowledges timer interrupt");
+  cp0.write(9, 0xfffffffe);
+  cp0.advance_cycles(6);
+  require(cp0.registers[9] == 1 && (cp0.registers[13] & 0x8000),
+          "Count wraps and matches Compare across wraparound");
+  cp0.write(11, 2);
+  cp0.advance_cycles(std::uint64_t{1} << 33);
+  require(cp0.registers[9] == 1 && (cp0.registers[13] & 0x8000),
+          "full counter revolution still latches Compare");
+
+  namespace mem = jit::memory;
+  std::array<std::byte, 2 * mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 2);
+  const let rwx =
+      mem::permission::read | mem::permission::write | mem::permission::execute;
+  require(
+      memory &&
+          (*memory)->map_ram({0xffffffff80000000ULL}, {0}, rwx).has_value() &&
+          (*memory)
+              ->map_ram({0xffffffff80001000ULL}, {mem::page_size}, rwx)
+              .has_value(),
+      "map clock and interrupt program");
+  constexpr std::array words{0x40014800u, 0x2c220014u, 0x1440fffdu,
+                             0u,          0x34030007u, 0x70000000u};
+  for (std::size_t i = 0; i < words.size(); i++)
+    require(
+        (*memory)
+            ->store<std::uint32_t>({0xffffffff80001000ULL + i * 4}, words[i])
+            .has_value(),
+        "install Count polling program");
+  let dispatch = jit::memory_dispatcher::create(**memory);
+  require(dispatch.has_value(), "create clock dispatcher");
+  mips::state state;
+  state.pc = {0xffffffff80001000ULL};
+  const let progressed = (*dispatch)->run_slice(state, 1000, 1000);
+  require(!progressed && progressed.error().pc == 0xffffffff80001014ULL &&
+              state.registers[1] >= 20 && state.registers[3] == 7,
+          "guest Count polling loop completes using retired block cycles");
+  let immutable = mem::address_space::create(ram, 1);
+  require(immutable &&
+              (*immutable)
+                  ->map_ram({0x1000}, {mem::page_size},
+                            mem::permission::read | mem::permission::execute)
+                  .has_value(),
+          "map immutable Count polling image");
+  std::array<mips::instruction_word, 5> polling;
+  for (std::size_t i = 0; i < polling.size(); i++)
+    polling[i] = {words[i]};
+  let fixed = jit::dispatcher::create(polling, {0x1000}, **immutable);
+  require(fixed.has_value(), "create immutable clock dispatcher");
+  mips::state fixed_state;
+  fixed_state.pc = {0x1000};
+  const let complete = (*fixed)->run_slice(fixed_state, 1000, 1000);
+  require(complete && complete->reason == jit::stop_reason::completed &&
+              fixed_state.registers[1] >= 20 && fixed_state.registers[3] == 7,
+          "immutable dispatcher observes Count advances between polling reads");
+  require((*memory)
+                  ->store<std::uint32_t>({0xffffffff80000180ULL}, 0x34040009)
+                  .has_value() &&
+              (*memory)
+                  ->store<std::uint32_t>({0xffffffff80000184ULL}, 0x70000000)
+                  .has_value(),
+          "install timer exception vector");
+  state = {};
+  state.pc = {0xffffffff80001000ULL};
+  state.cop0.registers[11] = 1;
+  state.cop0.registers[12] = 0x8001;
+  const let interrupted = (*dispatch)->run_slice(state, 100, 100);
+  require(
+      !interrupted && interrupted.error().pc == 0xffffffff80000184ULL &&
+          state.registers[4] == 9 &&
+          state.cop0.registers[14] == 0xffffffff80001000ULL &&
+          (state.cop0.registers[12] & 2) &&
+          (state.cop0.registers[13] & 0x807c) == 0x8000,
+      "Compare enters guest vector with pending timer, EXL and next-block EPC");
 }
 
 fn cop1_transfers() -> void {
@@ -2438,6 +2543,7 @@ fn main(int argc, char **argv) -> int {
   architectural_tlb();
   prefetch_hints();
   memory_barriers();
+  cp0_clock();
   cop1_transfers();
   merged_doubleword_loads();
   indexed_cache_maintenance();

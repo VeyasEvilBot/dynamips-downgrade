@@ -828,7 +828,8 @@ fn real_rom(const char *path) -> bool {
                 (*board)->cpu().registers[26] == 0xffffffffbfc003e0ULL &&
                 (*board)->cpu().registers[31] == 0xffffffffbfc0068cULL &&
                 (*board)->cpu().registers[29] == ios->entry() - 64 &&
-                (*board)->cpu().cop0.registers[9] == 0 &&
+                (*board)->cpu().cop0.registers[9] > 0 &&
+                (*board)->cpu().cop0.registers[9] < 1000000 &&
                 (*board)->cpu().cop0.registers[11] == 1000000 &&
                 (*board)->memory().load<std::uint64_t>(
                     {0xffffffff80003ff8ULL}) == 0xffffffffbfc00008ULL &&

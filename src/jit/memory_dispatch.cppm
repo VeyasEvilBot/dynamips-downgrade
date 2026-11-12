@@ -51,6 +51,8 @@ public:
         result.reason = stop_reason::budget_exhausted;
         return result;
       }
+      if (state.cop0.interrupt_pending())
+        state.pc = state.cop0.exception(0, state.pc, false);
       if (state.pc.value % 4)
         return std::unexpected(
             dispatch_error{dispatch_error_code::invalid_pc, state.pc.value});
@@ -85,6 +87,7 @@ public:
             executed.error().branch_pc,
             executed.error().code});
       }
+      state.cop0.advance_cycles(entry.instructions);
       state.pc.value = *executed;
       result.instructions += entry.instructions;
       result.blocks++;

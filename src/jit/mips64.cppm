@@ -53,6 +53,26 @@ constexpr fn jump_target(instruction_word word, guest_address pc) noexcept
 struct cop0_state {
   tlb::table translations;
   std::array<std::uint64_t, 32> registers{};
+  bool half_cycle = false;
+
+  // Count ticks every two virtual CPU cycles. Dispatch uses instruction slots
+  // as a deterministic cycle estimate, observed at block boundaries.
+  fn advance_cycles(std::uint64_t cycles) noexcept -> void {
+    const let odd = (cycles & 1) != 0;
+    const let ticks = cycles / 2 + (odd && half_cycle ? 1u : 0u);
+    half_cycle = half_cycle != odd;
+    const let before = static_cast<std::uint32_t>(registers[9]);
+    const let distance = static_cast<std::uint32_t>(registers[11] - before);
+    registers[9] = static_cast<std::uint32_t>(before + ticks);
+    if ((distance != 0 && distance <= ticks) ||
+        ticks >= (std::uint64_t{1} << 32))
+      registers[13] |= 1u << 15;
+  }
+
+  fn interrupt_pending() const noexcept -> bool {
+    return (registers[12] & 7) == 1 &&
+           (registers[12] & registers[13] & 0xff00) != 0;
+  }
 
   fn exception(std::uint32_t code, guest_address pc, bool delay_slot) noexcept
       -> guest_address {
@@ -175,9 +195,12 @@ struct error {
   if (start.value % 4 != 0)
     return std::unexpected(error{error_code::unaligned_pc, 0});
   for (std::size_t i = 0; i < words.size(); i++) {
-    if (words[i].bits == 0x42000001 || words[i].bits == 0x42000002 ||
-        words[i].bits == 0x42000008 || words[i].bits >> 26 == 0x2f ||
-        words[i].bits == 0x42000018 ||
+    const let count_read = (words[i].bits >> 26) == 0x10 &&
+                           ((words[i].bits >> 21) & 31) <= 1 &&
+                           ((words[i].bits >> 11) & 31) == 9;
+    if (count_read || words[i].bits == 0x42000001 ||
+        words[i].bits == 0x42000002 || words[i].bits == 0x42000008 ||
+        words[i].bits >> 26 == 0x2f || words[i].bits == 0x42000018 ||
         ((words[i].bits >> 26) == 0 &&
          ((words[i].bits & 63) == 0x0c || (words[i].bits & 63) == 0x0f))) {
       words = words.first(i + 1);
