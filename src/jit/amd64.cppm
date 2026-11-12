@@ -157,7 +157,7 @@ private:
 
   using entry_point = std::uint64_t (*)(std::uint64_t *, execution_context *);
 
-  template <std::unsigned_integral T>
+  template <std::unsigned_integral T, bool sign_extend = true>
   static fn load(execution_context *context, std::uint64_t address) noexcept
       -> std::uint64_t {
     let result = context->memory->load<T>({address});
@@ -166,7 +166,7 @@ private:
       context->failed = true;
       return 0;
     }
-    if constexpr (sizeof(T) == 1)
+    if constexpr (sizeof(T) == 1 && sign_extend)
       return static_cast<std::uint64_t>(
           std::int64_t{std::bit_cast<std::int8_t>(*result)});
     if constexpr (sizeof(T) == 4)
@@ -380,7 +380,8 @@ public:
         }
         if (node.op == ir::opcode::constant)
           continue;
-        if (node.op == ir::opcode::load8_signed ||
+        if (node.op == ir::opcode::load8_unsigned ||
+            node.op == ir::opcode::load8_signed ||
             node.op == ir::opcode::load32_signed ||
             node.op == ir::opcode::load64 || node.op == ir::opcode::store8 ||
             node.op == ir::opcode::store32 || node.op == ir::opcode::store64) {
@@ -395,7 +396,9 @@ public:
             if (errors.code)
               return failure(errors.code, i);
             values[i] = result;
-            const let target = node.op == ir::opcode::load8_signed
+            const let target = node.op == ir::opcode::load8_unsigned
+                                   ? &compiled_block::load<std::uint8_t, false>
+                               : node.op == ir::opcode::load8_signed
                                    ? &compiled_block::load<std::uint8_t>
                                : node.op == ir::opcode::load32_signed
                                    ? &compiled_block::load<std::uint32_t>
@@ -744,6 +747,7 @@ public:
         case ir::opcode::read_cop0:
         case ir::opcode::write_cop0:
         case ir::opcode::write_state:
+        case ir::opcode::load8_unsigned:
         case ir::opcode::load8_signed:
         case ir::opcode::load32_signed:
         case ir::opcode::load64:

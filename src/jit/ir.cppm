@@ -63,6 +63,7 @@ enum class opcode : std::uint8_t {
   read_cop0_64,
   write_cop0_64,
   load8_signed,
+  load8_unsigned,
   load32_signed,
   load64,
   store8,
@@ -267,6 +268,15 @@ struct node {
             source,
             slot,
             opcode::write_cop0_64,
+            width::bits64};
+  }
+
+  static constexpr fn load8_unsigned(value_id address,
+                                      std::uint32_t source) noexcept -> node {
+    return {{.inputs = {address, {}}},
+            source,
+            {},
+            opcode::load8_unsigned,
             width::bits64};
   }
 
@@ -634,6 +644,7 @@ private:
           !operand_valid(current.data.inputs.right))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::load8_unsigned:
     case opcode::load8_signed:
     case opcode::load32_signed:
     case opcode::load64:
@@ -730,11 +741,13 @@ private:
             std::format_to(out, "  state.write i64 %v{}, %state, {}",
                            current.data.inputs.left.index, current.slot.index);
         break;
+      case opcode::load8_unsigned:
       case opcode::load8_signed:
       case opcode::load32_signed:
       case opcode::load64:
         out = std::format_to(out, "  %v{} = load.guest.{} %v{}", i,
-                             current.op == opcode::load8_signed    ? "s8"
+                             current.op == opcode::load8_unsigned  ? "u8"
+                             : current.op == opcode::load8_signed  ? "s8"
                              : current.op == opcode::load32_signed ? "s32"
                                                                    : "i64",
                              current.data.inputs.left.index);

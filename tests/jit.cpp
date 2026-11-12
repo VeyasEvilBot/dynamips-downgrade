@@ -782,7 +782,8 @@ fn signed_byte_loads() -> void {
   alignas(std::max_align_t) std::array<std::byte, 8192> storage;
   std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                             std::pmr::null_memory_resource()};
-  constexpr std::array words{mips::instruction_word{0x80220001}};
+  constexpr std::array words{mips::instruction_word{0x80220001},
+                             mips::instruction_word{0x90230001}};
   let block = mips::translate(words, {0x1000}, arena);
   let compiler = amd64::compiler::create();
   require(block && compiler, "prepare signed byte load");
@@ -795,10 +796,12 @@ fn signed_byte_loads() -> void {
   for (unsigned value = 0; value < 256; value++) {
     ram[1] = static_cast<std::byte>(value);
     const let result = native->run(state, **memory);
-    require(result && state[2] == static_cast<std::uint64_t>(
-                                      value < 128 ? std::int64_t{value}
-                                                  : std::int64_t{value} - 256),
-            "LB sign extends every byte at an unaligned address");
+    require(result && state[3] == value &&
+                state[2] == static_cast<std::uint64_t>(
+                                value < 128 ? std::int64_t{value}
+                                            : std::int64_t{value} - 256),
+            "LB sign extends and LBU zero extends every byte at an unaligned "
+            "address");
   }
   state[1] = 0x8fff;
   const let fault = native->run(state, **memory);
