@@ -106,7 +106,10 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
     ios.emplace(std::move(*loaded));
   }
   dynamips::devices::rom_services services{
-      {0x16000000}, {{0xffffffffbe000000ULL}, {ios ? ios->entry() : 0}}};
+      {0x16000000},
+      {{0xffffffffbe000000ULL},
+       {ios ? ios->entry() : 0},
+       ios ? ios->machine_id() : std::uint16_t{0}}};
   std::array<std::byte, 128 * 1024> nvram_bytes{};
   dynamips::devices::byte_memory nvram{{0x1e000000}, nvram_bytes};
   const std::array attachments{

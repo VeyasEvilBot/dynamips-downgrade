@@ -87,6 +87,7 @@ class image {
 public:
   static constexpr std::size_t max_sections = 64;
   static constexpr std::size_t max_file_size = 256 * 1024 * 1024;
+  fn machine_id() const noexcept -> std::uint16_t { return machine_id_; }
   fn entry() const noexcept -> std::uint64_t { return entry_; }
   fn sections() const noexcept -> std::span<const section> {
     return {sections_.data(), count_};
@@ -116,6 +117,7 @@ public:
         header.e_version != EV_CURRENT ||
         (header.e_machine != EM_MIPS && header.e_machine != 0x19))
       return std::unexpected(error{error_code::unsupported_format});
+    result.machine_id_ = header.e_machine;
     result.entry_ = canonical(static_cast<std::uint32_t>(header.e_entry));
     const let bytes =
         std::as_bytes(std::span{result.file_.bytes.get(), result.file_.size});
@@ -286,5 +288,6 @@ private:
   std::array<section, max_sections> sections_{};
   std::size_t count_ = 0;
   std::uint64_t entry_ = 0;
+  std::uint16_t machine_id_ = 0;
 };
 } // namespace dynamips::firmware

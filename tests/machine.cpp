@@ -190,7 +190,8 @@ fn composition() -> bool {
     return false;
   let rom = firmware::image::read(rom_file.path);
   let ios = firmware::image::read(ios_file.path);
-  if (!check(rom && ios && rom->entry() == 0xffffffffbfc00000ULL &&
+  if (!check(rom && ios && ios->machine_id() == 8 &&
+                 rom->entry() == 0xffffffffbfc00000ULL &&
                  rom->sections().size() == 2,
              "load and sign-extend big endian firmware addresses"))
     return false;
@@ -432,7 +433,7 @@ fn byte_memory_contract() -> bool {
 fn rom_service_queues() -> bool {
   using dynamips::devices::rom_output;
   dynamips::devices::rom_services device{
-      {0x16000000}, {{0xffffffffbe000000ULL}, {0xffffffff80008000ULL}}};
+      {0x16000000}, {{0xffffffffbe000000ULL}, {0xffffffff80008000ULL}, 8}};
   jit::devices::bus bus;
   if (!check(bus.add({{0x16000000}, mem::page_size}, device.descriptor())
                  .has_value(),
@@ -450,7 +451,10 @@ fn rom_service_queues() -> bool {
   let &guest = **memory;
   if (!check(guest.load<std::uint32_t>({0x8000}) == 0x1e94b3df &&
                  guest.load<std::uint32_t>({0x8044}) == 0xbe000000 &&
-                 guest.load<std::uint32_t>({0x8028}) == 0x80008000,
+                 guest.load<std::uint32_t>({0x8028}) == 0x80008000 &&
+                 guest.load<std::uint32_t>({0x802c}) == 8 &&
+                 guest.load<std::uint32_t, std::endian::little>({0x802c}) ==
+                     0x08000000,
              "ROM identification register matches the real firmware"))
     return false;
   if (!check(!guest.store<std::uint8_t>({0x8040}, 'R') &&
@@ -531,7 +535,8 @@ fn real_rom(const char *path) -> bool {
     return false;
   using dynamips::devices::rom_output;
   dynamips::devices::rom_services services{
-      {0x16000000}, {{0xffffffffbe000000ULL}, {ios->entry()}}};
+      {0x16000000},
+      {{0xffffffffbe000000ULL}, {ios->entry()}, ios->machine_id()}};
   std::array<std::byte, 128 * 1024> nvram_bytes{};
   dynamips::devices::byte_memory nvram{{0x1e000000}, nvram_bytes};
   const std::array attachments{

@@ -19,6 +19,7 @@ export namespace dynamips::devices {
 struct rom_boot_info {
   jit::memory::virtual_address nvram;
   jit::memory::virtual_address ios_entry{};
+  std::uint16_t elf_machine_id = 0;
 };
 
 enum class rom_output : std::uint8_t { console, log };
@@ -78,6 +79,9 @@ private:
       break;
     case 0x28:
       value = static_cast<std::uint32_t>(self.boot_.ios_entry.value);
+      break;
+    case 0x2c:
+      value = self.boot_.elf_machine_id;
       break;
     case 0x44:
       value = static_cast<std::uint32_t>(self.boot_.nvram.value);
