@@ -1723,6 +1723,50 @@ template <bool Doubleword> fn merged_stores() -> void {
           "pages");
 }
 
+fn unsigned_word_load() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(compiler && memory &&
+              (*memory)
+                  ->map_ram({0x1000}, {0},
+                            mem::permission::read | mem::permission::write)
+                  .has_value(),
+          "prepare unsigned word loads");
+  for (const unsigned destination : {0u, 2u}) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{
+        mips::instruction_word{0x9c200000u | (destination << 16)},
+        mips::instruction_word{0x8c230000}};
+    let block = mips::translate(words, {0x8000}, arena);
+    require(block.has_value(), "translate LWU and LW");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile LWU and LW");
+    for (const std::uint32_t value :
+         {0u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
+      require((*memory)->store<std::uint32_t>({0x1000}, value).has_value(),
+              "seed unsigned word source");
+      std::array<std::uint64_t, 32> registers{};
+      registers[1] = 0x1000;
+      require(native->run(registers, **memory).has_value() &&
+                  registers[0] == 0 &&
+                  registers[2] == (destination ? value : 0) &&
+                  registers[3] == static_cast<std::uint64_t>(std::int64_t{
+                                      std::bit_cast<std::int32_t>(value)}),
+              "LWU zero extends while LW sign extends bit 31");
+    }
+    std::array<std::uint64_t, 32> registers{};
+    registers[1] = 0x1001;
+    const let fault = native->run(registers, **memory);
+    require(!fault && fault.error().pc == 0x8000 &&
+                fault.error().access.reason == mem::fault_reason::misaligned,
+            "LWU validates alignment even when its destination is r0");
+  }
+}
+
 fn indexed_cache_maintenance() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -2679,6 +2723,7 @@ fn main(int argc, char **argv) -> int {
   merged_loads<true>();
   merged_stores<false>();
   merged_stores<true>();
+  unsigned_word_load();
   indexed_cache_maintenance();
   hilo_arithmetic();
   hilo_transfers();

@@ -238,9 +238,9 @@ struct error {
             return (op == 0 &&
                     ((word.bits & 63) == 0x21 || (word.bits & 63) == 0x23)) ||
                    op == 0x21 || op == 0x25 || op == 0x29 || op == 0x09 ||
-                   op == 0x20 || op == 0x24 || op == 0x23 || op == 0x28 ||
-                   op == 0x2b || op == 0x2a || op == 0x2e || op == 0x2c ||
-                   op == 0x2d || op == 0x37 || op == 0x3f;
+                   op == 0x20 || op == 0x24 || op == 0x23 || op == 0x27 ||
+                   op == 0x28 || op == 0x2b || op == 0x2a || op == 0x2e ||
+                   op == 0x2c || op == 0x2d || op == 0x37 || op == 0x3f;
           })) +
       2 * static_cast<std::size_t>(
               std::ranges::count_if(words, [](instruction_word word) {
@@ -320,7 +320,7 @@ struct error {
         opcode == 0x1a || opcode == 0x1b || opcode == 0x22 || opcode == 0x26;
     const bool load = merge_load || opcode == 0x21 || opcode == 0x25 ||
                       opcode == 0x20 || opcode == 0x24 || opcode == 0x23 ||
-                      opcode == 0x37;
+                      opcode == 0x27 || opcode == 0x37;
     const bool merge_store =
         opcode == 0x2a || opcode == 0x2e || opcode == 0x2c || opcode == 0x2d;
     const bool store = merge_store || opcode == 0x29 || opcode == 0x28 ||
@@ -708,7 +708,8 @@ struct error {
           return failed(written.error());
       } else {
         const let value = result.append(
-            opcode == 0x21   ? ir::node::load16_signed(*address, source)
+            opcode == 0x27   ? ir::node::load32_unsigned(*address, source)
+            : opcode == 0x21 ? ir::node::load16_signed(*address, source)
             : opcode == 0x25 ? ir::node::load16_unsigned(*address, source)
             : opcode == 0x24 ? ir::node::load8_unsigned(*address, source)
             : opcode == 0x20 ? ir::node::load8_signed(*address, source)

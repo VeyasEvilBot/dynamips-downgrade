@@ -80,6 +80,7 @@ enum class opcode : std::uint8_t {
   load16_signed,
   load16_unsigned,
   load32_signed,
+  load32_unsigned,
   load64,
   load32_left,
   load32_right,
@@ -409,6 +410,15 @@ struct node {
             source,
             {},
             opcode::load16_unsigned,
+            width::bits64};
+  }
+
+  static constexpr fn load32_unsigned(value_id address,
+                                       std::uint32_t source) noexcept -> node {
+    return {{.inputs = {address, {}}},
+            source,
+            {},
+            opcode::load32_unsigned,
             width::bits64};
   }
 
@@ -876,6 +886,7 @@ private:
     case opcode::load16_unsigned:
     case opcode::load8_unsigned:
     case opcode::load8_signed:
+    case opcode::load32_unsigned:
     case opcode::load32_signed:
     case opcode::load64:
     case opcode::load32_left:
@@ -1034,6 +1045,7 @@ private:
       case opcode::load16_unsigned:
       case opcode::load8_unsigned:
       case opcode::load8_signed:
+      case opcode::load32_unsigned:
       case opcode::load32_signed:
       case opcode::load64:
         out = std::format_to(out, "  %v{} = load.guest.{} %v{}", i,
@@ -1041,6 +1053,7 @@ private:
                              : current.op == opcode::load16_unsigned ? "u16"
                              : current.op == opcode::load8_unsigned  ? "u8"
                              : current.op == opcode::load8_signed    ? "s8"
+                             : current.op == opcode::load32_unsigned ? "u32"
                              : current.op == opcode::load32_signed   ? "s32"
                                                                      : "i64",
                              current.data.inputs.left.index);

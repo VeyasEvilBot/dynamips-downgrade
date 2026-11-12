@@ -187,7 +187,7 @@ private:
     if constexpr (sizeof(T) == 2 && sign_extend)
       return static_cast<std::uint64_t>(
           std::int64_t{std::bit_cast<std::int16_t>(*result)});
-    if constexpr (sizeof(T) == 4)
+    if constexpr (sizeof(T) == 4 && sign_extend)
       return static_cast<std::uint64_t>(
           std::int64_t{std::bit_cast<std::int32_t>(*result)});
     return *result;
@@ -627,6 +627,7 @@ public:
             node.op == ir::opcode::store16 ||
             node.op == ir::opcode::load8_unsigned ||
             node.op == ir::opcode::load8_signed ||
+            node.op == ir::opcode::load32_unsigned ||
             node.op == ir::opcode::load32_signed ||
             node.op == ir::opcode::load64 || node.op == ir::opcode::store8 ||
             node.op == ir::opcode::store64_left ||
@@ -653,6 +654,8 @@ public:
                                    ? &compiled_block::load<std::uint8_t, false>
                                : node.op == ir::opcode::load8_signed
                                    ? &compiled_block::load<std::uint8_t>
+                               : node.op == ir::opcode::load32_unsigned
+                                   ? &compiled_block::load<std::uint32_t, false>
                                : node.op == ir::opcode::load32_signed
                                    ? &compiled_block::load<std::uint32_t>
                                    : &compiled_block::load<std::uint64_t>;
@@ -1085,6 +1088,7 @@ public:
         case ir::opcode::load16_unsigned:
         case ir::opcode::load8_unsigned:
         case ir::opcode::load8_signed:
+        case ir::opcode::load32_unsigned:
         case ir::opcode::load32_signed:
         case ir::opcode::load32_left:
         case ir::opcode::load32_right:
