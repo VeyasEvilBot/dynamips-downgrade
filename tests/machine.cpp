@@ -183,6 +183,68 @@ fn rom_contract() -> bool {
       "ROM is executable but cannot gain write permission through an alias");
 }
 
+fn io_console() -> bool {
+  dynamips::devices::c7200_iofpga io;
+  let &endpoint = *io.descriptor().endpoint;
+  const let access = [](std::uint64_t offset) {
+    return mem::device_access{
+        {0x1e840000 + offset}, std::endian::big, mem::access_size::byte};
+  };
+  const std::array input{std::byte{'C'}};
+  if (!check(endpoint.write(endpoint.context, access(0x41c), 'A').has_value() &&
+                 endpoint.write(endpoint.context, access(0x45c), 'B')
+                     .has_value() &&
+                 io.receive(input) == 1 &&
+                 endpoint.read(endpoint.context, access(0x40c)) == 5 &&
+                 endpoint.read(endpoint.context, access(0x41c)) == 'C' &&
+                 endpoint.read(endpoint.context, access(0x40c)) == 4,
+             "SCN2681 status and RX follow queued console data"))
+    return false;
+  bool correct = true;
+  for (const bool auxiliary : {false, true}) {
+    const let drained = io.drain(
+        auxiliary,
+        [&](std::span<const std::byte> bytes) noexcept
+            -> std::expected<std::size_t, int> {
+          correct = correct && bytes.size() == 1 &&
+                    bytes[0] == (auxiliary ? std::byte{'B'} : std::byte{'A'});
+          return bytes.size();
+        });
+    if (!check(drained && *drained == 1 && correct,
+               "console and auxiliary TX queues remain separate"))
+      return false;
+  }
+  for (unsigned i = 0; i < jit::uart::capacity; i++)
+    if (!endpoint.write(endpoint.context, access(0x41c), 'X'))
+      return false;
+  if (!check(endpoint.read(endpoint.context, access(0x40c)) == 0 &&
+                 !endpoint.write(endpoint.context, access(0x41c), 'Y'),
+             "full console queue removes TX-ready and rejects overflow"))
+    return false;
+  bool first = true;
+  const let partial = io.drain(false,
+                               [&](std::span<const std::byte>) noexcept
+                                   -> std::expected<std::size_t, int> {
+                                 if (!first)
+                                   return 0;
+                                 first = false;
+                                 return 17;
+                               });
+  if (!check(partial && *partial == 17 &&
+                 endpoint.read(endpoint.context, access(0x40c)) == 4,
+             "partial host drain restores TX readiness"))
+    return false;
+  io.reset();
+  const let empty =
+      io.drain(false,
+               [](std::span<const std::byte> bytes) noexcept
+                   -> std::expected<std::size_t, int> { return bytes.size(); });
+  return check(
+      empty && *empty == 0 &&
+          endpoint.read(endpoint.context, access(0x204)) == 4,
+      "I/O FPGA reset clears queues and restores packed NVRAM control");
+}
+
 fn mapped_memory() -> bool {
   fixture rom_file;
   constexpr std::array words{0x3c016000u, // lui r1, 0x6000
@@ -786,6 +848,8 @@ fn main(int argc, char **argv) -> int {
                      probe.context,
                      {{0x1e8403a2}, std::endian::big, mem::access_size::half}),
              "NPE-400 board probe reads zero; unknown registers fault"))
+    return 1;
+  if (!io_console())
     return 1;
   if (!mapped_memory())
     return 1;

@@ -60,38 +60,36 @@ fn setup_message(machine::setup_issue issue) noexcept -> std::string_view {
   return "machine setup failed";
 }
 
-fn flush_output(dynamips::devices::rom_services &device)
-    -> std::expected<void, std::error_code> {
-  using dynamips::devices::rom_output;
-  for (const let channel : {rom_output::console, rom_output::log}) {
-    FILE *stream = channel == rom_output::console ? stdout : stderr;
-    const let drained = device.drain(
-        channel,
-        [stream, channel](std::span<const std::byte> bytes) noexcept
-            -> std::expected<std::size_t, std::error_code> {
-          if (channel == rom_output::log)
-            return bytes.size();
-          try {
-            std::print(
-                stream, "{}",
-                std::string_view{reinterpret_cast<const char *>(bytes.data()),
+template <typename Drain>
+fn flush_output(Drain &&drain) -> std::expected<void, std::error_code> {
+  for (const bool auxiliary : {false, true}) {
+    FILE *stream = !auxiliary ? stdout : stderr;
+    const let drained =
+        drain(auxiliary,
+              [stream, auxiliary](std::span<const std::byte> bytes) noexcept
+                  -> std::expected<std::size_t, std::error_code> {
+                if (auxiliary)
+                  return bytes.size();
+                try {
+                  std::print(stream, "{}",
+                             std::string_view{
+                                 reinterpret_cast<const char *>(bytes.data()),
                                  bytes.size()});
-            return bytes.size();
-          } catch (const std::system_error &error) {
-            return std::unexpected(error.code());
-          } catch (const std::bad_alloc &) {
-            return std::unexpected(
-                std::make_error_code(std::errc::not_enough_memory));
-          }
-        });
+                  return bytes.size();
+                } catch (const std::system_error &error) {
+                  return std::unexpected(error.code());
+                } catch (const std::bad_alloc &) {
+                  return std::unexpected(
+                      std::make_error_code(std::errc::not_enough_memory));
+                }
+              });
     if (!drained) {
       if (const let *cause =
               std::get_if<std::error_code>(&drained.error().cause))
         return std::unexpected(*cause);
       return std::unexpected(std::make_error_code(std::errc::protocol_error));
     }
-    if (channel == rom_output::console && *drained != 0 &&
-        std::fflush(stream) != 0)
+    if (!auxiliary && *drained != 0 && std::fflush(stream) != 0)
       return std::unexpected(std::error_code{errno, std::generic_category()});
   }
   return {};
@@ -149,7 +147,22 @@ fn run(const char *rom_path, const char *ios_path,
     const let result = (*board)->run_slice(
         budget ? *budget - executed : std::numeric_limits<std::uint64_t>::max(),
         64, dump_ir);
-    if (const let flushed = flush_output(services); !flushed) {
+    if (const let flushed =
+            flush_output([&services](bool auxiliary, let &&sink) {
+              using dynamips::devices::rom_output;
+              return services.drain(auxiliary ? rom_output::log
+                                              : rom_output::console,
+                                    std::forward<decltype(sink)>(sink));
+            });
+        !flushed) {
+      std::println(stderr, "boot: console output failed: {}",
+                   flushed.error().message());
+      return 1;
+    }
+    if (const let flushed = flush_output([&io](bool auxiliary, let &&sink) {
+          return io.drain(auxiliary, std::forward<decltype(sink)>(sink));
+        });
+        !flushed) {
       std::println(stderr, "boot: console output failed: {}",
                    flushed.error().message());
       return 1;
