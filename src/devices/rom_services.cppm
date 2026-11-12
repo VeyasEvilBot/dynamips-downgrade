@@ -1,11 +1,15 @@
 module;
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <utility>
+#include <span>
+#include <string_view>
+#include <limits>
 
 #include <dynamips/macros.h>
 
@@ -16,12 +20,19 @@ import jit.fifo;
 import jit.memory;
 
 export namespace dynamips::devices {
+struct rommon_variable {
+  std::string_view name;
+  std::string_view value;
+};
+
 struct rom_boot_info {
   jit::memory::virtual_address nvram;
   jit::memory::virtual_address ios_entry{};
   std::uint16_t elf_machine_id = 0;
   std::uint32_t ram_megabytes = 0;
   std::uint16_t configuration_register = 0;
+  // Borrowed immutable boot environment; the owner outlives the device.
+  std::span<const rommon_variable> variables{};
 };
 
 enum class rom_output : std::uint8_t { console, log };
@@ -50,7 +61,13 @@ public:
              nullptr}};
   }
 
-  fn reset() noexcept -> void { queues_ = {}; }
+  fn reset() noexcept -> void {
+    queues_ = {};
+    variable_buffer_ = {};
+    variable_position_ = 0;
+    variable_status_ = 0;
+    variable_overflow_ = false;
+  }
 
   template <typename Sink> fn drain(rom_output channel, Sink &&sink) noexcept {
     return queue(channel).drain(std::forward<Sink>(sink));
@@ -61,6 +78,28 @@ private:
   rom_boot_info boot_;
   std::array<jit::byte_fifo<capacity>, 2> queues_{};
   jit::memory::device endpoint_;
+  std::array<char, 512> variable_buffer_{};
+  std::size_t variable_position_ = 0;
+  std::uint32_t variable_status_ = 0;
+  bool variable_overflow_ = false;
+
+  fn query_variable() noexcept -> void {
+    const std::string_view name{variable_buffer_.data()};
+    const let found =
+        std::ranges::find(boot_.variables, name, &rommon_variable::name);
+    const bool available = !variable_overflow_ &&
+                           found != boot_.variables.end() &&
+                           found->value.size() < variable_buffer_.size();
+    variable_status_ =
+        available ? 0 : std::numeric_limits<std::uint32_t>::max();
+    if (available) {
+      std::ranges::copy(found->value, variable_buffer_.begin());
+      variable_buffer_[found->value.size()] = 0;
+    } else
+      variable_buffer_[0] = 0;
+    variable_position_ = 0;
+    variable_overflow_ = false;
+  }
 
   fn queue(rom_output channel) noexcept -> jit::byte_fifo<capacity> & {
     return channel == rom_output::console ? queues_[0] : queues_[1];
@@ -91,6 +130,17 @@ private:
     case 0x2c:
       value = self.boot_.elf_machine_id;
       break;
+    case 0x54:
+      value = self.variable_position_ < self.variable_buffer_.size()
+                  ? static_cast<unsigned char>(
+                        self.variable_buffer_[self.variable_position_])
+                  : 0;
+      if (value != 0)
+        self.variable_position_++;
+      break;
+    case 0x58:
+      value = self.variable_status_;
+      break;
     case 0x44:
       value = static_cast<std::uint32_t>(self.boot_.nvram.value);
       break;
@@ -110,11 +160,33 @@ private:
     if (access.address.value < self.base_.value)
       return std::unexpected(mem::device_error::bus);
     const let offset = access.address.value - self.base_.value;
-    if (offset != 0x40 && offset != 0x3c)
-      return std::unexpected(mem::device_error::bus);
     let word = static_cast<std::uint32_t>(value);
     if (access.order == std::endian::little)
       word = std::byteswap(word);
+    if (offset == 0x54) {
+      if (self.variable_position_ < self.variable_buffer_.size() - 1) {
+        self.variable_buffer_[self.variable_position_++] =
+            static_cast<char>(word & 255);
+        self.variable_buffer_[self.variable_position_] = 0;
+      } else
+        self.variable_overflow_ = true;
+      return {};
+    }
+    if (offset == 0x58) {
+      switch (word & 255) {
+      case 2:
+        self.query_variable();
+        return {};
+      case 3:
+        self.variable_position_ = 0;
+        self.variable_overflow_ = false;
+        return {};
+      default:
+        return std::unexpected(mem::device_error::bus);
+      }
+    }
+    if (offset != 0x40 && offset != 0x3c)
+      return std::unexpected(mem::device_error::bus);
     const let channel = offset == 0x40 ? rom_output::console : rom_output::log;
     if (!self.queue(channel).push(static_cast<std::byte>(word & 0xff)))
       return std::unexpected(mem::device_error::bus);

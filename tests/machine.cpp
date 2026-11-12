@@ -431,10 +431,17 @@ fn byte_memory_contract() -> bool {
 }
 
 fn rom_service_queues() -> bool {
+  const std::array environment{
+      dynamips::devices::rommon_variable{"BOOT_TEST", "flash:image.bin"},
+      dynamips::devices::rommon_variable{"EMPTY", ""}};
   using dynamips::devices::rom_output;
-  dynamips::devices::rom_services device{
-      {0x16000000},
-      {{0xffffffffbe000000ULL}, {0xffffffff80008000ULL}, 8, 256, 0x2142}};
+  dynamips::devices::rom_services device{{0x16000000},
+                                         {{0xffffffffbe000000ULL},
+                                          {0xffffffff80008000ULL},
+                                          8,
+                                          256,
+                                          0x2142,
+                                          environment}};
   jit::devices::bus bus;
   if (!check(bus.add({{0x16000000}, mem::page_size}, device.descriptor())
                  .has_value(),
@@ -461,6 +468,53 @@ fn rom_service_queues() -> bool {
                  guest.load<std::uint32_t, std::endian::little>({0x802c}) ==
                      0x08000000,
              "ROM identification register matches the real firmware"))
+    return false;
+  const let query = [&](std::string_view name) {
+    if (!guest.store<std::uint32_t>({0x8058}, 3))
+      return false;
+    for (const char byte : name)
+      if (!guest.store<std::uint32_t>({0x8054},
+                                      static_cast<unsigned char>(byte)))
+        return false;
+    return guest.store<std::uint32_t>({0x8058}, 2).has_value();
+  };
+  if (!check(query("MISSING") &&
+                 guest.load<std::uint32_t>({0x8058}) == UINT32_MAX &&
+                 guest.load<std::uint32_t>({0x8054}) == 0,
+             "missing ROMMON variables report failure without stale data"))
+    return false;
+  if (!check(query("BOOT_TEST") && guest.load<std::uint32_t>({0x8058}) == 0,
+             "query a borrowed boot variable"))
+    return false;
+  for (const char byte : std::string_view{"flash:image.bin"})
+    if (!check(guest.load<std::uint32_t>({0x8054}) ==
+                   static_cast<unsigned char>(byte),
+               "read ROMMON value through the data register"))
+      return false;
+  if (!check(guest.load<std::uint32_t>({0x8054}) == 0 &&
+                 guest.load<std::uint32_t>({0x8054}) == 0 && query("EMPTY") &&
+                 guest.load<std::uint32_t>({0x8058}) == 0 &&
+                 guest.load<std::uint32_t>({0x8054}) == 0,
+             "empty ROMMON values remain distinct from missing variables"))
+    return false;
+  if (!guest.store<std::uint32_t>({0x8058}, 3))
+    return false;
+  for (std::size_t i = 0; i < 1024; i++)
+    if (!guest.store<std::uint32_t>({0x8054}, 'X'))
+      return false;
+  if (!check(guest.store<std::uint32_t>({0x8058}, 2).has_value() &&
+                 guest.load<std::uint32_t>({0x8058}) == UINT32_MAX &&
+                 query("BOOT_TEST") &&
+                 guest.load<std::uint32_t>({0x8058}) == 0 &&
+                 !guest.store<std::uint32_t>({0x8058}, 1),
+             "oversized queries recover; variable writes remain unsupported"))
+    return false;
+  bus.reset();
+  if (!check(guest.load<std::uint32_t>({0x8058}) == 0 &&
+                 guest.load<std::uint32_t>({0x8054}) == 0 &&
+                 query("BOOT_TEST") && guest.load<std::uint32_t>({0x8058}) == 0,
+             "reset clears transaction state and retains the supplied "
+             "environment"))
     return false;
   if (!check(!guest.store<std::uint8_t>({0x8040}, 'R') &&
                  !guest.store<std::uint32_t>({0x8044}, 1) &&
