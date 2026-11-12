@@ -19,6 +19,7 @@
 #include <dynamips/macros.h>
 
 import devices.byte_memory;
+import devices.c7200_midplane;
 import devices.rom_services;
 import machine.firmware;
 import machine.core;
@@ -118,9 +119,12 @@ fn run(const char *rom_path, const char *ios_path,
        dynamips::c7200::configuration_register}};
   std::array<std::byte, 128 * 1024> nvram_bytes{};
   dynamips::devices::byte_memory nvram{{0x1e000000}, nvram_bytes};
+  dynamips::devices::c7200_midplane midplane;
   const std::array attachments{
       machine::attachment{dynamips::c7200::rom_services, services.descriptor()},
-      machine::attachment{dynamips::c7200::nvram, nvram.descriptor()}};
+      machine::attachment{dynamips::c7200::nvram, nvram.descriptor()},
+      machine::attachment{dynamips::c7200::midplane_fpga,
+                          midplane.descriptor()}};
   let board = machine::instance::create(
       dynamips::c7200::npe400, *rom, ios ? &*ios : nullptr, attachments,
       stop_at_handoff ? machine::boot_mode::handoff : machine::boot_mode::run);

@@ -21,6 +21,7 @@
 #include <dynamips/macros.h>
 
 import devices.byte_memory;
+import devices.c7200_midplane;
 import devices.rom_services;
 import machine.firmware;
 import machine.core;
@@ -755,6 +756,26 @@ fn real_rom(const char *path) -> bool {
 } // namespace
 
 fn main(int argc, char **argv) -> int {
+  dynamips::devices::c7200_midplane midplane;
+  let &endpoint = *midplane.descriptor().endpoint;
+  if (!check(
+          endpoint.read(
+              endpoint.context,
+              {{0x1e80007b}, std::endian::big, mem::access_size::byte}) == 0 &&
+              endpoint
+                  .write(
+                      endpoint.context,
+                      {{0x1e80007b}, std::endian::big, mem::access_size::byte},
+                      0xff)
+                  .has_value() &&
+              endpoint.read(endpoint.context, {{0x1e80007b},
+                                               std::endian::big,
+                                               mem::access_size::byte}) == 0 &&
+              !endpoint.read(
+                  endpoint.context,
+                  {{0x1e80007c}, std::endian::big, mem::access_size::byte}),
+          "midplane priority writes are ignored and unknown registers fault"))
+    return 1;
   if (!mapped_memory())
     return 1;
   try {
