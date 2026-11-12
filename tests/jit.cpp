@@ -1173,6 +1173,71 @@ fn branch_likely() -> void {
   }
 }
 
+fn hilo_arithmetic() -> void {
+  namespace mem = jit::memory;
+
+  struct sample {
+    std::uint64_t left, right, high, low;
+  };
+
+  constexpr std::array multiplication{
+      sample{0, 0xffffffff, 0, 0},
+      sample{0x7fffffff, 2, 0, 0xfffffffffffffffeULL},
+      sample{0x80000000, 0xffffffff, 0, 0xffffffff80000000ULL},
+      sample{0x80000000, 2, UINT64_MAX, 0},
+      sample{0x1234567800000003ULL, 0xfedcba9800000007ULL, 0, 21}};
+  constexpr std::array division{
+      sample{0xffffffff, 2, 1, 0x7fffffff},
+      sample{0x80000000, 1, 0, 0xffffffff80000000ULL},
+      sample{7, 3, 1, 2},
+      sample{0x1234567800000007ULL, 0xfedcba9800000003ULL, 1, 2},
+      sample{0, 3, 0, 0},
+      sample{7, 0, 0xaabb, 0xccdd},
+      sample{7, 0x100000000ULL, 0xaabb, 0xccdd}};
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create HI/LO arithmetic compiler");
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(memory.has_value(), "create HI/LO arithmetic memory");
+  for (const std::uint32_t function : {0x18u, 0x1bu}) {
+    alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{0x00220000u | function},
+                           mips::instruction_word{0x00001810},
+                           mips::instruction_word{0x00002012}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block && ir::optimize(*block, ir::fold_constants).has_value(),
+            "translate and optimize HI/LO arithmetic effects");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile HI/LO arithmetic");
+    const std::span<const sample> samples =
+        function == 0x18 ? std::span<const sample>{multiplication}
+                         : std::span<const sample>{division};
+    for (const let &test : samples) {
+      std::array<std::uint64_t, 32> state{};
+      state[1] = test.left;
+      state[2] = test.right;
+      mips::hilo_state hilo;
+      hilo.registers = {0xaabb, 0xccdd};
+      const let absent = native->run(state, **memory);
+      require(!absent &&
+                  absent.error().code == amd64::error_code::hilo_required,
+              "HI/LO arithmetic requires its state bank");
+      require(native->run(state, **memory, nullptr, &hilo).has_value() &&
+                  hilo.registers[0] == test.high &&
+                  hilo.registers[1] == test.low && state[3] == test.high &&
+                  state[4] == test.low && state[1] == test.left &&
+                  state[2] == test.right,
+              "MULT and DIVU produce sign-extended word halves and preserve "
+              "zero-divisor state");
+    }
+    const std::array invalid{mips::instruction_word{0x00220800u | function}};
+    require(!mips::translate(invalid, {0x1000}, arena),
+            "HI/LO arithmetic rejects reserved destination fields");
+  }
+}
+
 fn hilo_transfers() -> void {
   namespace mem = jit::memory;
   alignas(std::max_align_t) std::array<std::byte, 16384> storage;
@@ -1908,6 +1973,7 @@ fn main(int argc, char **argv) -> int {
   sign_branches();
   branches_and_dispatch();
   branch_likely();
+  hilo_arithmetic();
   hilo_transfers();
   checked_addition();
   exception_return();

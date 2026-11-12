@@ -1,6 +1,7 @@
 module;
 
 #include <array>
+#include <bit>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -84,6 +85,35 @@ struct cop0_state {
 
 struct hilo_state {
   std::array<std::uint64_t, 2> registers{};
+
+  fn multiply32(std::uint64_t left, std::uint64_t right) noexcept -> void {
+    const let product =
+        std::int64_t{
+            std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(left))} *
+        std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(right));
+    const let bits = static_cast<std::uint64_t>(product);
+    write_words(static_cast<std::uint32_t>(bits >> 32),
+                static_cast<std::uint32_t>(bits));
+  }
+
+  fn divide_unsigned32(std::uint64_t left, std::uint64_t right) noexcept
+      -> void {
+    const let numerator = static_cast<std::uint32_t>(left);
+    const let denominator = static_cast<std::uint32_t>(right);
+    // Preserve HI/LO for the unpredictable zero-divisor case, as in legacy
+    // DIVU.
+    if (denominator == 0)
+      return;
+    write_words(numerator % denominator, numerator / denominator);
+  }
+
+private:
+  fn write_words(std::uint32_t high, std::uint32_t low) noexcept -> void {
+    registers[0] = static_cast<std::uint64_t>(
+        std::int64_t{std::bit_cast<std::int32_t>(high)});
+    registers[1] = static_cast<std::uint64_t>(
+        std::int64_t{std::bit_cast<std::int32_t>(low)});
+  }
 };
 
 struct state {
@@ -181,6 +211,8 @@ struct error {
     const let rt = static_cast<std::uint16_t>((bits >> 16) & 31);
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
     const let function = bits & 63;
+    const bool hilo_arithmetic =
+        opcode == 0 && (function == 0x18 || function == 0x1b);
     const bool hilo_read =
         opcode == 0 && (function == 0x10 || function == 0x12);
     const bool hilo_write =
@@ -221,7 +253,7 @@ struct error {
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !eret &&
         !hilo_read && !hilo_write && !addu && !subu && !slt && !sltu &&
-        !variable_shift && !nor &&
+        !variable_shift && !nor && !hilo_arithmetic &&
         !(opcode == 0 && (function == 0x24 || function == 0x25 ||
                           function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
@@ -231,6 +263,8 @@ struct error {
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((hilo_read && (rs != 0 || rt != 0 || ((bits >> 6) & 31) != 0)) ||
         (hilo_write && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0)))
+      return std::unexpected(error{error_code::invalid_encoding, i});
+    if (hilo_arithmetic && (rd != 0 || ((bits >> 6) & 31) != 0))
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((word_shift || double_shift) && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
@@ -248,7 +282,7 @@ struct error {
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = mfc0 || immediate || memory_access ? rt : rd;
     if (destination == 0 && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !syscall && !eret && !hilo_write && !addi)
+        !mtc0 && !syscall && !eret && !hilo_write && !addi && !hilo_arithmetic)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -310,6 +344,19 @@ struct error {
       }
       return registers[index];
     };
+    if (hilo_arithmetic) {
+      const let left = read(rs);
+      const let right = read(rt);
+      if (!left || !right)
+        return failed(!left ? left.error() : right.error());
+      if (let written = result.append(
+              function == 0x18
+                  ? ir::node::multiply32(*left, *right, source)
+                  : ir::node::divide_unsigned32(*left, *right, source));
+          !written)
+        return failed(written.error());
+      continue;
+    }
     if (hilo_read || hilo_write) {
       const ir::state_slot slot{
           static_cast<std::uint16_t>((function >> 1) & 1)};

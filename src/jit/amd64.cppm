@@ -188,6 +188,16 @@ private:
     }
   }
 
+  static fn multiply32(execution_context *context, std::uint64_t left,
+                        std::uint64_t right) noexcept -> void {
+    context->hilo->multiply32(left, right);
+  }
+
+  static fn divide_unsigned32(execution_context *context, std::uint64_t left,
+                               std::uint64_t right) noexcept -> void {
+    context->hilo->divide_unsigned32(left, right);
+  }
+
   static fn exception_return(execution_context *context) noexcept
       -> std::uint64_t {
     return context->cop0->exception_return().value;
@@ -467,6 +477,28 @@ public:
             return failure(emitted, i);
           if (const let emitted = output.bind(success))
             return failure(emitted, i);
+          continue;
+        }
+        if (node.op == ir::opcode::multiply32 ||
+            node.op == ir::opcode::divide_unsigned32) {
+          uses_hilo = true;
+          const let left = operand(node.data.inputs.left);
+          const let right = operand(node.data.inputs.right);
+          if (!left || !right)
+            return failure(!left ? left.error() : right.error(), i);
+          const let target = node.op == ir::opcode::multiply32
+                                 ? &compiled_block::multiply32
+                                 : &compiled_block::divide_unsigned32;
+          asmjit::InvokeNode *call = nullptr;
+          if (const let status =
+                  output.invoke(&call, asmjit::Imm{target},
+                                asmjit::FuncSignature::build<
+                                    void, compiled_block::execution_context *,
+                                    std::uint64_t, std::uint64_t>()))
+            return failure(status, i);
+          call->setArg(0, context);
+          call->setArg(1, *left);
+          call->setArg(2, *right);
           continue;
         }
         if (node.op == ir::opcode::read_hilo ||
@@ -770,6 +802,8 @@ public:
           }
           break;
         }
+        case ir::opcode::multiply32:
+        case ir::opcode::divide_unsigned32:
         case ir::opcode::read_hilo:
         case ir::opcode::write_hilo:
         case ir::opcode::add_checked32:

@@ -41,6 +41,8 @@ enum class opcode : std::uint8_t {
   constant,
   read_hilo,
   write_hilo,
+  multiply32,
+  divide_unsigned32,
   read_state,
   shift_right_arithmetic32,
   shift_right32,
@@ -78,7 +80,8 @@ enum class opcode : std::uint8_t {
 };
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
-  return op != opcode::exception_return && op != opcode::write_hilo &&
+  return op != opcode::multiply32 && op != opcode::divide_unsigned32 &&
+         op != opcode::exception_return && op != opcode::write_hilo &&
          op != opcode::syscall && op != opcode::write_cop0_64 &&
          op != opcode::write_cop0 && op != opcode::write_state &&
          op != opcode::store16 && op != opcode::store8 &&
@@ -133,6 +136,25 @@ struct node {
   static constexpr fn constant(std::uint64_t bits, std::uint32_t source,
                                 width type = width::bits64) noexcept -> node {
     return {{.immediate = bits}, source, {}, opcode::constant, type};
+  }
+
+  static constexpr fn multiply32(value_id left, value_id right,
+                                  std::uint32_t source) noexcept -> node {
+    return {{.inputs = {left, right}},
+            source,
+            {},
+            opcode::multiply32,
+            width::bits64};
+  }
+
+  static constexpr fn divide_unsigned32(value_id left, value_id right,
+                                         std::uint32_t source) noexcept
+      -> node {
+    return {{.inputs = {left, right}},
+            source,
+            {},
+            opcode::divide_unsigned32,
+            width::bits64};
   }
 
   static constexpr fn read_hilo(state_slot slot, std::uint32_t source) noexcept
@@ -675,6 +697,8 @@ private:
     case opcode::shift_left32_variable:
     case opcode::shift_right32_variable:
     case opcode::shift_right_arithmetic32_variable:
+    case opcode::multiply32:
+    case opcode::divide_unsigned32:
     case opcode::add_checked32:
     case opcode::unsigned_less:
     case opcode::signed_less:
@@ -827,6 +851,13 @@ private:
             current.op == opcode::shift_left32_variable    ? "shl.i32.sext"
             : current.op == opcode::shift_right32_variable ? "lshr.i32.sext"
                                                            : "ashr.i32.sext",
+            current.data.inputs.left.index, current.data.inputs.right.index);
+        break;
+      case opcode::multiply32:
+      case opcode::divide_unsigned32:
+        out = std::format_to(
+            out, "  hilo.{} %v{}, %v{}",
+            current.op == opcode::multiply32 ? "mul.s32" : "div.u32",
             current.data.inputs.left.index, current.data.inputs.right.index);
         break;
       case opcode::add_checked32:
