@@ -22,6 +22,7 @@
 
 import devices.byte_memory;
 import devices.c7200_midplane;
+import devices.c7200_iofpga;
 import devices.rom_services;
 import machine.firmware;
 import machine.core;
@@ -775,6 +776,16 @@ fn main(int argc, char **argv) -> int {
                   endpoint.context,
                   {{0x1e80007c}, std::endian::big, mem::access_size::byte}),
           "midplane priority writes are ignored and unknown registers fault"))
+    return 1;
+  dynamips::devices::c7200_iofpga io;
+  let &probe = *io.descriptor().endpoint;
+  if (!check(probe.read(probe.context, {{0x1e8403a0},
+                                        std::endian::big,
+                                        mem::access_size::half}) == 0 &&
+                 !probe.read(
+                     probe.context,
+                     {{0x1e8403a2}, std::endian::big, mem::access_size::half}),
+             "NPE-400 board probe reads zero; unknown registers fault"))
     return 1;
   if (!mapped_memory())
     return 1;
