@@ -27,6 +27,7 @@ import jit.memory;
 import jit.devices;
 import jit.mips64;
 import jit.dispatch;
+import jit.memory_dispatch;
 import jit.execution;
 
 export namespace dynamips::machine {
@@ -85,15 +86,17 @@ constexpr fn physical(std::uint64_t address) noexcept
   return (address - cached_base) & (direct_size - 1);
 }
 
+enum class boot_mode { run, handoff };
+
 class instance {
 public:
   instance(const instance &) = delete;
   fn operator=(const instance &) -> instance & = delete;
 
-  [[nodiscard]] static fn
-  create(definition model, const firmware::image &rom,
-         const firmware::image *ios = nullptr,
-         std::span<const attachment> attachments = {}) noexcept
+  [[nodiscard]] static fn create(definition model, const firmware::image &rom,
+                                  const firmware::image *ios = nullptr,
+                                  std::span<const attachment> attachments = {},
+                                  boot_mode mode = boot_mode::run) noexcept
       -> std::expected<std::unique_ptr<instance>, setup_error> {
     if (model.ram_bytes == 0 || model.ram_bytes % mem::page_size ||
         model.rom.size == 0 || model.rom.size % mem::page_size ||
@@ -179,7 +182,10 @@ public:
              offset += mem::page_size) {
           const let mapped = result->memory_->map_ram(
               {alias + offset}, {offset},
-              mem::permission::read | mem::permission::write);
+              mode == boot_mode::run
+                  ? mem::permission::read | mem::permission::write |
+                        mem::permission::execute
+                  : mem::permission::read | mem::permission::write);
           if (!mapped)
             return std::unexpected(setup_error{mapped.error(), offset});
         }
@@ -207,31 +213,40 @@ public:
           }
         }
       }
-      const let start = *physical(model.cpu.reset.value) - model.rom.base.value;
-      std::uint64_t end = start;
-      for (const let &section : rom.sections()) {
-        const let address = physical(section.address);
-        if (address && *address >= model.rom.base.value &&
-            *address - model.rom.base.value < model.rom.size)
-          end = std::max(end, *address - model.rom.base.value + section.size);
+      if (mode == boot_mode::run) {
+        let dispatch = jit::memory_dispatcher::create(*result->memory_);
+        if (!dispatch)
+          return std::unexpected(setup_error{dispatch.error()});
+        result->dispatch_ = std::move(*dispatch);
+      } else {
+        const let start =
+            *physical(model.cpu.reset.value) - model.rom.base.value;
+        std::uint64_t end = start;
+        for (const let &section : rom.sections()) {
+          const let address = physical(section.address);
+          if (address && *address >= model.rom.base.value &&
+              *address - model.rom.base.value < model.rom.size)
+            end = std::max(end, *address - model.rom.base.value + section.size);
+        }
+        if (end <= start || (end - start + 3) / 4 > 65536)
+          return std::unexpected(
+              setup_error{setup_issue::boot_window_too_large});
+        result->boot_.resize(static_cast<std::size_t>((end - start + 3) / 4));
+        for (std::size_t i = 0; i < result->boot_.size(); i++) {
+          std::uint32_t word;
+          std::memcpy(&word, result->rom_.get() + start + i * 4, sizeof(word));
+          if constexpr (std::endian::native == std::endian::little)
+            word = std::byteswap(word);
+          result->boot_[i] = {word};
+        }
+        let dispatch = jit::dispatcher::create(
+            result->boot_, model.cpu.reset, *result->memory_,
+            ios ? std::optional{jit::mips64::guest_address{ios->entry()}}
+                : std::nullopt);
+        if (!dispatch)
+          return std::unexpected(setup_error{dispatch.error()});
+        result->dispatch_ = std::move(*dispatch);
       }
-      if (end <= start || (end - start + 3) / 4 > 65536)
-        return std::unexpected(setup_error{setup_issue::boot_window_too_large});
-      result->boot_.resize(static_cast<std::size_t>((end - start + 3) / 4));
-      for (std::size_t i = 0; i < result->boot_.size(); i++) {
-        std::uint32_t word;
-        std::memcpy(&word, result->rom_.get() + start + i * 4, sizeof(word));
-        if constexpr (std::endian::native == std::endian::little)
-          word = std::byteswap(word);
-        result->boot_[i] = {word};
-      }
-      let dispatch = jit::dispatcher::create(
-          result->boot_, model.cpu.reset, *result->memory_,
-          ios ? std::optional{jit::mips64::guest_address{ios->entry()}}
-              : std::nullopt);
-      if (!dispatch)
-        return std::unexpected(setup_error{dispatch.error()});
-      result->dispatch_ = std::move(*dispatch);
       result->reset();
       return result;
     } catch (const std::bad_alloc &) {
@@ -261,8 +276,12 @@ public:
   [[nodiscard]] fn run_slice(std::uint64_t budget, std::size_t blocks = 64,
                               bool dump_ir = false) noexcept
       -> std::expected<jit::dispatch_result, jit::execution_error> {
-    jit::execution_loop loop{*dispatch_, devices_};
-    return loop.run_slice(state_, budget, blocks, dump_ir);
+    return std::visit(
+        [&](let &guest) {
+          jit::execution_loop loop{*guest, devices_};
+          return loop.run_slice(state_, budget, blocks, dump_ir);
+        },
+        dispatch_);
   }
 
 private:
@@ -271,7 +290,9 @@ private:
   jit::devices::bus devices_;
   std::unique_ptr<mem::address_space> memory_;
   std::vector<jit::mips64::instruction_word> boot_;
-  std::unique_ptr<jit::dispatcher> dispatch_;
+  std::variant<std::unique_ptr<jit::dispatcher>,
+               std::unique_ptr<jit::memory_dispatcher>>
+      dispatch_;
   jit::mips64::state state_{};
   std::optional<std::uint64_t> ios_entry_;
 

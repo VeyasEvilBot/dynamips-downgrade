@@ -227,7 +227,7 @@ target("jit-core")
     add_cxxflags("-Wextra", "-Wpedantic", "-Wshadow", "-Wconversion", "-Wsign-conversion")
     add_includedirs("include")
     add_packages("asmjit", { public = true })
-    add_files("modules/asmjit.cppm", "src/jit/ir.cppm", "src/jit/mips64.cppm", "src/jit/amd64.cppm", "src/jit/memory.cppm", "src/jit/fifo.cppm", "src/jit/uart.cppm", "src/jit/example.cppm", "src/jit/dispatch.cppm", "src/jit/devices.cppm", "src/jit/execution.cppm", { public = true })
+    add_files("modules/asmjit.cppm", "src/jit/ir.cppm", "src/jit/mips64.cppm", "src/jit/amd64.cppm", "src/jit/memory.cppm", "src/jit/fifo.cppm", "src/jit/uart.cppm", "src/jit/example.cppm", "src/jit/dispatch.cppm", "src/jit/memory_dispatch.cppm", "src/jit/devices.cppm", "src/jit/execution.cppm", { public = true })
 target_end()
 
 target("uart-console")

@@ -53,6 +53,48 @@ struct dispatch_result {
   std::size_t compiled;
 };
 
+struct native_block {
+  amd64::compiled_block code;
+  std::uint32_t instructions;
+};
+
+[[nodiscard]] fn
+compile_native_block(std::span<const mips64::instruction_word> words,
+                     mips64::guest_address start,
+                     const amd64::compiler &compiler,
+                     std::span<std::byte> scratch, bool dump_ir) noexcept
+    -> std::expected<native_block, dispatch_error> {
+  std::pmr::monotonic_buffer_resource arena{scratch.data(), scratch.size(),
+                                            std::pmr::null_memory_resource()};
+  let translated = mips64::translate(words, start, arena);
+  if (!translated)
+    return std::unexpected(
+        dispatch_error{dispatch_error_code::translation,
+                       start.value + translated.error().instruction_index * 4,
+                       {},
+                       translated.error()});
+  if (let optimized = ir::optimize(*translated, ir::fold_constants);
+      !optimized)
+    return std::unexpected(
+        dispatch_error{dispatch_error_code::translation, start.value});
+  if (dump_ir) {
+    try {
+      translated->print("compiled block");
+    } catch (const std::bad_alloc &) {
+      return std::unexpected(
+          dispatch_error{dispatch_error_code::out_of_memory, start.value});
+    } catch (const std::exception &) {
+      return std::unexpected(
+          dispatch_error{dispatch_error_code::diagnostic, start.value});
+    }
+  }
+  let code = compiler.compile(*translated, arena);
+  if (!code)
+    return std::unexpected(dispatch_error{
+        dispatch_error_code::compilation, start.value, {}, {}, code.error()});
+  return native_block{std::move(*code), translated->info().instruction_count};
+}
+
 // One owner, immutable instruction image. RAM and the address space outlive
 // this object; direct host writes to executable backing are forbidden while in
 // use.
@@ -214,38 +256,13 @@ private:
         return std::unexpected(
             dispatch_error{dispatch_error_code::code_changed, pc + i * 4});
     }
-    std::pmr::monotonic_buffer_resource arena{scratch_.data(), scratch_.size(),
-                                              std::pmr::null_memory_resource()};
-    let translated =
-        mips64::translate(std::span{image_}.subspan(index, count), {pc}, arena);
-    if (!translated)
-      return std::unexpected(
-          dispatch_error{dispatch_error_code::translation,
-                         pc + translated.error().instruction_index * 4,
-                         {},
-                         translated.error()});
-    if (let optimized = ir::optimize(*translated, ir::fold_constants);
-        !optimized)
-      return std::unexpected(
-          dispatch_error{dispatch_error_code::translation, pc});
-    // Printing is diagnostic work, never part of cached execution.
-    if (dump_ir) {
-      try {
-        translated->print("compiled block");
-      } catch (const std::bad_alloc &) {
-        return std::unexpected(
-            dispatch_error{dispatch_error_code::out_of_memory, pc});
-      } catch (const std::exception &) {
-        return std::unexpected(
-            dispatch_error{dispatch_error_code::diagnostic, pc});
-      }
-    }
-    let compiled = compiler_.compile(*translated, arena);
+    let compiled =
+        compile_native_block(std::span{image_}.subspan(index, count), {pc},
+                             compiler_, scratch_, dump_ir);
     if (!compiled)
-      return std::unexpected(dispatch_error{
-          dispatch_error_code::compilation, pc, {}, {}, compiled.error()});
-    cache_[index].instructions = translated->info().instruction_count;
-    cache_[index].code.emplace(std::move(*compiled));
+      return std::unexpected(compiled.error());
+    cache_[index].instructions = compiled->instructions;
+    cache_[index].code.emplace(std::move(compiled->code));
     return {};
   }
 };

@@ -23,9 +23,9 @@ struct execution_error {
 // Borrowed components outlive the loop. Hooks perform bounded work; transports
 // can enqueue or poll I/O and leave blocked device queues pending. Service
 // errors stop the run; completed guest counters are returned only on success.
-class execution_loop {
+template <typename Dispatcher = dispatcher> class execution_loop {
 public:
-  execution_loop(dispatcher &guest, devices::bus &devices) noexcept
+  execution_loop(Dispatcher &guest, devices::bus &devices) noexcept
       : guest_(guest), devices_(devices) {}
 
   [[nodiscard]] fn run_slice(mips64::state &state, std::uint64_t budget,
@@ -47,7 +47,7 @@ public:
   }
 
 private:
-  dispatcher &guest_;
+  Dispatcher &guest_;
   devices::bus &devices_;
 };
 } // namespace jit

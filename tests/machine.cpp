@@ -211,7 +211,8 @@ fn composition() -> bool {
        {&uart,
         [](void *value) noexcept { static_cast<jit::uart *>(value)->reset(); },
         nullptr}}}};
-  let board = machine::instance::create(model, *rom, &*ios, attachments);
+  let board = machine::instance::create(model, *rom, &*ios, attachments,
+                                         machine::boot_mode::handoff);
   if (!check(board.has_value(),
              "compose CPU, firmware, RAM, ROM and attached UART"))
     return false;
@@ -536,8 +537,9 @@ fn real_rom(const char *path) -> bool {
   const std::array attachments{
       machine::attachment{dynamips::c7200::rom_services, services.descriptor()},
       machine::attachment{dynamips::c7200::nvram, nvram.descriptor()}};
-  let board = machine::instance::create(dynamips::c7200::npe400, *rom_image,
-                                         &*ios, attachments);
+  let board =
+      machine::instance::create(dynamips::c7200::npe400, *rom_image, &*ios,
+                                attachments, machine::boot_mode::handoff);
   if (!check(board.has_value(), "prepare full-size C7200 NPE-400 memory map"))
     return false;
   const let first =
@@ -604,14 +606,33 @@ fn real_rom(const char *path) -> bool {
   const let nvram_first =
       (*board)->memory().load<std::uint8_t>({0xffffffffbe000080ULL});
   (*board)->reset();
-  return check(
-      (*board)->cpu().pc.value == dynamips::c7200::npe400.cpu.reset.value &&
-          (*board)->cpu().cop0.registers[12] == 0x00400000 &&
-          (*board)->cpu().cop0.registers[15] == 0x2721 &&
-          (*board)->cpu().cop0.registers[11] == 0 && nvram_first &&
-          (*board)->memory().load<std::uint8_t>({0xffffffffbe000080ULL}) ==
-              *nvram_first,
-      "reset restores CP0 bootstrap state and preserves initialized NVRAM");
+  if (!check(
+          (*board)->cpu().pc.value == dynamips::c7200::npe400.cpu.reset.value &&
+              (*board)->cpu().cop0.registers[12] == 0x00400000 &&
+              (*board)->cpu().cop0.registers[15] == 0x2721 &&
+              (*board)->cpu().cop0.registers[11] == 0 && nvram_first &&
+              (*board)->memory().load<std::uint8_t>({0xffffffffbe000080ULL}) ==
+                  *nvram_first,
+          "reset restores CP0 bootstrap state and preserves initialized NVRAM"))
+    return false;
+  board->reset();
+  board = machine::instance::create(dynamips::c7200::npe400, *rom_image, &*ios,
+                                    attachments);
+  if (!check(board.has_value(), "create RAM execution machine"))
+    return false;
+  std::uint64_t remaining = 4096;
+  for (;;) {
+    const let running = (*board)->run_slice(remaining);
+    if (!check(running.has_value(), "execute the ROM and loaded RAM entry"))
+      return false;
+    remaining -= running->instructions;
+    if (running->reason != jit::stop_reason::yielded)
+      return check(
+          running->reason == jit::stop_reason::budget_exhausted &&
+              (*board)->cpu().registers[20] == 0xc0de &&
+              (*board)->cpu().pc.value > ios->entry(),
+          "normal boot executes IOS instructions beyond the old handoff stop");
+  }
 }
 } // namespace
 

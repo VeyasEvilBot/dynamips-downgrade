@@ -94,7 +94,7 @@ fn flush_output(dynamips::devices::rom_services &device)
 }
 
 fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
-         bool dump_ir) -> int {
+         bool dump_ir, bool stop_at_handoff) -> int {
   let rom = load(rom_path);
   if (!rom)
     return 1;
@@ -112,8 +112,9 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
   const std::array attachments{
       machine::attachment{dynamips::c7200::rom_services, services.descriptor()},
       machine::attachment{dynamips::c7200::nvram, nvram.descriptor()}};
-  let board = machine::instance::create(dynamips::c7200::npe400, *rom,
-                                         ios ? &*ios : nullptr, attachments);
+  let board = machine::instance::create(
+      dynamips::c7200::npe400, *rom, ios ? &*ios : nullptr, attachments,
+      stop_at_handoff ? machine::boot_mode::handoff : machine::boot_mode::run);
   if (!board) {
     const let &error = board.error();
     if (const let *host = std::get_if<std::error_code>(&error.cause))
@@ -192,16 +193,21 @@ fn main(int argc, char **argv) -> int {
     const char *ios = nullptr;
     std::uint64_t budget = 4096;
     bool dump_ir = false;
+    bool stop_at_handoff = false;
     for (int i = 1; i < argc; i++) {
       const std::string_view argument{argv[i]};
       if (argument == "--help") {
         std::println(
             "Usage: c7200-boot [--rom ELF] [--ios ELF_OR_ZIP] [--budget N] "
-            "[--dump-ir]\n"
-            "Prepare the C++ NPE-400 chassis and probe ROM execution.\n"
+            "[--dump-ir] [--stop-at-handoff]\n"
+            "Boot the C7200 ROM and IOS image.\n"
             "Default ROM: stable/mips64_microcode. Exit 2 means boot is "
-            "blocked; exit 0 includes a successful IOS handoff.");
+            "blocked or the instruction budget is exhausted.");
         return 0;
+      }
+      if (argument == "--stop-at-handoff") {
+        stop_at_handoff = true;
+        continue;
       }
       if (argument == "--dump-ir") {
         dump_ir = true;
@@ -230,7 +236,7 @@ fn main(int argc, char **argv) -> int {
         }
       }
     }
-    return run(rom, ios, budget, dump_ir);
+    return run(rom, ios, budget, dump_ir, stop_at_handoff);
   } catch (const std::exception &error) {
     std::println(stderr, "boot: {}", error.what());
     return 1;

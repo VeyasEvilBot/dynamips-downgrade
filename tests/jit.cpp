@@ -23,6 +23,7 @@ import jit.memory;
 import jit.uart;
 import jit.example;
 import jit.dispatch;
+import jit.memory_dispatch;
 
 namespace {
 namespace ir = jit::ir;
@@ -797,6 +798,65 @@ fn branch_likely() -> void {
   }
 }
 
+fn writable_code_dispatch() -> void {
+  namespace mem = jit::memory;
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 2);
+  const let rwx =
+      mem::permission::read | mem::permission::write | mem::permission::execute;
+  require(memory && (*memory)->map_ram({0x1000}, {0}, rwx).has_value() &&
+              (*memory)->map_ram({0x3000}, {0}, rwx).has_value(),
+          "map writable code aliases");
+  constexpr std::array words{0x34011020u, 0x3c023403u, 0x34420007u, 0xac220000u,
+                             0x08000408u, 0u,          0x70000000u, 0u,
+                             0x34030001u, 0x70000000u};
+  for (std::size_t i = 0; i < words.size(); i++)
+    require(
+        (*memory)->store<std::uint32_t>({0x1000 + i * 4}, words[i]).has_value(),
+        "load mutable program");
+  let dispatch = jit::memory_dispatcher::create(**memory);
+  require(dispatch.has_value(), "create memory dispatcher");
+  mips::state state{};
+  state.pc = {0x1020};
+  const let first = (*dispatch)->run_slice(state, 1);
+  require(first && state.registers[3] == 1 && state.pc.value == 0x1024,
+          "execute the valid prefix before an unsupported instruction");
+  state.pc = {0x1000};
+  const let changed = (*dispatch)->run_slice(state, 100);
+  require(!changed &&
+              changed.error().code == jit::dispatch_error_code::translation &&
+              changed.error().pc == 0x1024 && state.registers[3] == 7,
+          "guest store updates cached code before control reaches it");
+  require((*memory)->store<std::uint32_t>({0x3020}, 0x34030009).has_value(),
+          "replace code through its physical alias");
+  state.pc = {0x1020};
+  const let alias = (*dispatch)->run_slice(state, 1);
+  require(alias && alias->compiled == 1 && state.registers[3] == 9,
+          "alias writes invalidate cached instruction bytes");
+  state.pc = {0x1020};
+  const let cached = (*dispatch)->run_slice(state, 1);
+  require(cached && cached->compiled == 0 && state.registers[3] == 9,
+          "unchanged code reuses its native block");
+  require(
+      (*memory)
+          ->protect({0x1000}, mem::permission::read | mem::permission::write)
+          .has_value(),
+      "revoke code execution");
+  state.pc = {0x1020};
+  const let denied = (*dispatch)->run_slice(state, 1);
+  require(!denied && denied.error().code == jit::dispatch_error_code::memory &&
+              denied.error().access.reason == mem::fault_reason::permission,
+          "cached code cannot bypass execute permission changes");
+  require((*memory)->protect({0x1000}, rwx).has_value() &&
+              (*memory)->store<std::uint32_t>({0x1ffc}, 0x0c000400).has_value(),
+          "place a branch at the end of a mapped page");
+  state.pc = {0x1ffc};
+  const let slot = (*dispatch)->run_slice(state, 2);
+  require(!slot && slot.error().code == jit::dispatch_error_code::memory &&
+              slot.error().pc == 0x2000 && slot.error().branch_pc == 0x1ffc,
+          "missing delay-slot instruction retains both fetch PCs");
+}
+
 fn handoff_boundary() -> void {
   namespace mem = jit::memory;
   std::array<std::byte, mem::page_size> ram{};
@@ -1251,6 +1311,7 @@ fn main(int argc, char **argv) -> int {
   example_program();
   branches_and_dispatch();
   branch_likely();
+  writable_code_dispatch();
   handoff_boundary();
   register_call();
   register_jump();
