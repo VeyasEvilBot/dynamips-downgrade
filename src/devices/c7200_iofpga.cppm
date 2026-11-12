@@ -10,11 +10,15 @@ export module devices.c7200_iofpga;
 import jit.devices;
 import jit.memory;
 import jit.uart;
+import devices.serial_eeprom;
 
 export namespace dynamips::devices {
 class c7200_iofpga {
 public:
-  c7200_iofpga() noexcept : endpoint_{this, read, write} {}
+  c7200_iofpga(std::span<const std::uint16_t> cpu = {},
+               std::span<const std::uint16_t> midplane = {}) noexcept
+      : cpu_eeprom_(cpu), midplane_eeprom_(midplane),
+        endpoint_{this, read, write} {}
 
   c7200_iofpga(const c7200_iofpga &) = delete;
   fn operator=(const c7200_iofpga &) -> c7200_iofpga & = delete;
@@ -31,6 +35,9 @@ public:
              nullptr}};
   }
   fn reset() noexcept -> void {
+    cpu_eeprom_.reset();
+    midplane_eeprom_.reset();
+    eeprom_pins_ = 0;
     console_.reset();
     auxiliary_.reset();
     control_ = 0;
@@ -48,6 +55,8 @@ private:
   jit::uart console_{{0}}, auxiliary_{{0}};
   std::uint32_t control_ = 0;
   std::uint8_t interrupt_mask_ = 0;
+  nmc93c46 cpu_eeprom_, midplane_eeprom_;
+  std::uint32_t eeprom_pins_ = 0;
   jit::memory::device endpoint_;
 
   static fn valid_size(jit::memory::access_size size) noexcept -> bool {
@@ -68,6 +77,14 @@ private:
     let &self = *static_cast<c7200_iofpga *>(context);
     const let offset = access.address.value - 0x1e840000;
     switch (offset) {
+    case 0x21c: {
+      let value = self.eeprom_pins_;
+      if (value & 4)
+        value = (value & ~64u) | (self.cpu_eeprom_.output() ? 64u : 0u);
+      if (value & 32)
+        value = (value & ~128u) | (self.midplane_eeprom_.output() ? 128u : 0u);
+      return value;
+    }
     case 0x204:
       return self.control_ | 4u;
     case 0x224:
@@ -119,6 +136,13 @@ private:
     let &self = *static_cast<c7200_iofpga *>(context);
     const let offset = access.address.value - 0x1e840000;
     switch (offset) {
+    case 0x21c:
+      self.eeprom_pins_ = static_cast<std::uint32_t>(value);
+      self.cpu_eeprom_.write((value & 4) != 0, (value & 2) != 0,
+                             (value & 1) != 0);
+      self.midplane_eeprom_.write((value & 32) != 0, (value & 16) != 0,
+                                  (value & 8) != 0);
+      return {};
     case 0x204:
       self.control_ = static_cast<std::uint32_t>(value);
       return {};

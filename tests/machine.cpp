@@ -183,6 +183,62 @@ fn rom_contract() -> bool {
       "ROM is executable but cannot gain write permission through an alias");
 }
 
+fn serial_board_identity() -> bool {
+  dynamips::devices::c7200_iofpga io{dynamips::c7200::npe400_eeprom,
+                                     dynamips::c7200::vxr_eeprom};
+  let &endpoint = *io.descriptor().endpoint;
+  const mem::device_access pins{
+      {0x1e84021c}, std::endian::big, mem::access_size::word};
+  const let read_word =
+      [&](unsigned chip,
+          unsigned address) -> std::expected<std::uint16_t, mem::device_error> {
+    const unsigned select = 4u << (chip * 3);
+    const unsigned clock = 2u << (chip * 3);
+    const unsigned data = 1u << (chip * 3);
+    const unsigned output = 64u << chip;
+    if (let result = endpoint.write(endpoint.context, pins, 0); !result)
+      return std::unexpected(result.error());
+    if (let result = endpoint.write(endpoint.context, pins, select); !result)
+      return std::unexpected(result.error());
+    // Leading zero clocks do not begin a command.
+    if (let result = endpoint.write(endpoint.context, pins, select | clock);
+        !result)
+      return std::unexpected(result.error());
+    const unsigned command = 3 | (address << 3);
+    for (unsigned bit = 0; bit < 9; bit++) {
+      const unsigned value = select | ((command & (1u << bit)) ? data : 0u);
+      if (let result = endpoint.write(endpoint.context, pins, value); !result)
+        return std::unexpected(result.error());
+      if (let result = endpoint.write(endpoint.context, pins, value | clock);
+          !result)
+        return std::unexpected(result.error());
+    }
+    std::uint16_t word = 0;
+    for (unsigned bit = 0; bit < 16; bit++) {
+      if (let result = endpoint.write(endpoint.context, pins, select); !result)
+        return std::unexpected(result.error());
+      if (let result = endpoint.write(endpoint.context, pins, select | clock);
+          !result)
+        return std::unexpected(result.error());
+      const let value = endpoint.read(endpoint.context, pins);
+      if (!value)
+        return std::unexpected(value.error());
+      if (*value & output)
+        word |= static_cast<std::uint16_t>(1u << bit);
+    }
+    return word;
+  };
+  if (!check(read_word(0, 0) == 0x04ff && read_word(0, 26) == 0x3430 &&
+                 read_word(0, 63) == 0xffff && read_word(1, 0) == 0x0106 &&
+                 read_word(1, 1) == 0x0201 && read_word(1, 63) == 0xffff,
+             "clocked CPU/VXR EEPROM reads select independent chips and bound "
+             "addresses"))
+    return false;
+  io.reset();
+  return check(read_word(0, 1) == 0x4001 && read_word(1, 1) == 0x0201,
+               "reset clears serial command state and preserves board images");
+}
+
 fn io_console() -> bool {
   dynamips::devices::c7200_iofpga io;
   let &endpoint = *io.descriptor().endpoint;
@@ -848,6 +904,8 @@ fn main(int argc, char **argv) -> int {
                      probe.context,
                      {{0x1e8403a2}, std::endian::big, mem::access_size::half}),
              "NPE-400 board probe reads zero; unknown registers fault"))
+    return 1;
+  if (!serial_board_identity())
     return 1;
   if (!io_console())
     return 1;

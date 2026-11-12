@@ -119,7 +119,8 @@ fn run(const char *rom_path, const char *ios_path,
   std::array<std::byte, 128 * 1024> nvram_bytes{};
   dynamips::devices::byte_memory nvram{{0x1e000000}, nvram_bytes};
   dynamips::devices::c7200_midplane midplane;
-  dynamips::devices::c7200_iofpga io;
+  dynamips::devices::c7200_iofpga io{dynamips::c7200::npe400_eeprom,
+                                     dynamips::c7200::vxr_eeprom};
   const std::array attachments{
       machine::attachment{dynamips::c7200::rom_services, services.descriptor()},
       machine::attachment{dynamips::c7200::nvram, nvram.descriptor()},
