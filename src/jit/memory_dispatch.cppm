@@ -1,5 +1,8 @@
 module;
+#include <algorithm>
 #include <array>
+#include <bit>
+#include <cstring>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -92,6 +95,7 @@ private:
     std::uint64_t generation = 0;
     std::uint32_t instructions = 0;
     std::array<mips64::instruction_word, 65> source{};
+    std::array<const std::byte *, 2> host{};
   };
 
   memory::address_space &memory_;
@@ -107,12 +111,14 @@ private:
     if (!entry.code || entry.pc != pc ||
         entry.generation != memory_.mapping_generation())
       return false;
-    for (std::size_t i = 0; i < entry.instructions; i++) {
-      const let word = memory_.fetch<std::uint32_t>({pc + i * 4});
-      if (!word || *word != entry.source[i].bits)
-        return false;
-    }
-    return true;
+    const let bytes =
+        std::as_bytes(std::span{entry.source}).first(entry.instructions * 4);
+    const let first = std::min(
+        bytes.size(), memory::page_size - (pc & (memory::page_size - 1)));
+    return std::memcmp(entry.host[0], bytes.data(), first) == 0 &&
+           (first == bytes.size() ||
+            std::memcmp(entry.host[1], bytes.data() + first,
+                        bytes.size() - first) == 0);
   }
 
   fn compile(cached_block &entry, std::uint64_t pc, bool dump_ir) noexcept
@@ -164,10 +170,28 @@ private:
     }
     if (!native)
       return std::unexpected(native.error());
+    const let first = memory_.executable_tail({pc});
+    if (!first)
+      return std::unexpected(
+          dispatch_error{dispatch_error_code::memory, pc, first.error()});
+    std::array<const std::byte *, 2> host{first->data(), nullptr};
+    if (native->instructions * 4 > first->size()) {
+      const let second = memory_.executable_tail({pc + first->size()});
+      if (!second)
+        return std::unexpected(dispatch_error{
+            dispatch_error_code::memory, pc + first->size(), second.error()});
+      host[1] = second->data();
+    }
+    entry.host = host;
     entry.pc = pc;
     entry.generation = memory_.mapping_generation();
     entry.instructions = native->instructions;
-    entry.source = words;
+    for (std::size_t i = 0; i < native->instructions; i++) {
+      const let bits = words[i].bits;
+      entry.source[i].bits = std::endian::native == std::endian::little
+                                 ? std::byteswap(bits)
+                                 : bits;
+    }
     entry.code.emplace(std::move(native->code));
     return {};
   }

@@ -284,6 +284,29 @@ public:
     return read<T, Order, access_kind::execute>(address);
   }
 
+  // Borrowed executable RAM/ROM, ending at the current page boundary.
+  // Mappings and permissions must be rechecked after mapping_generation
+  // changes.
+  [[nodiscard]] fn executable_tail(virtual_address address) noexcept
+      -> std::expected<std::span<const std::byte>, fault> {
+    if (address.value % 4 != 0)
+      return std::unexpected(fault{address, fault_reason::misaligned,
+                                   access_kind::execute, access_size::word});
+    const let entry = lookup<access_kind::execute>(address);
+    const std::byte *host;
+    if (entry)
+      host = entry->host_page + (address.value & (page_size - 1));
+    else {
+      const let resolved =
+          resolve(address, access_kind::execute, access_size::word);
+      if (!resolved)
+        return std::unexpected(resolved.error());
+      host = resolved->host;
+    }
+    return std::span<const std::byte>{
+        host, page_size - (address.value & (page_size - 1))};
+  }
+
   template <std::unsigned_integral T, std::endian Order = std::endian::big>
   [[nodiscard]] fn store(virtual_address address, T value) noexcept
       -> std::expected<void, fault> {

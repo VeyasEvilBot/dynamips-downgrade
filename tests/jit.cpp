@@ -1555,6 +1555,57 @@ fn writable_code_dispatch() -> void {
           "missing delay-slot instruction retains both fetch PCs");
 }
 
+fn cross_page_code_validation() -> void {
+  namespace mem = jit::memory;
+  std::array<std::byte, 3 * mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 4);
+  const let rwx =
+      mem::permission::read | mem::permission::write | mem::permission::execute;
+  require(
+      memory && (*memory)->map_ram({0x1000}, {0}, rwx).has_value() &&
+          (*memory)->map_ram({0x2000}, {2 * mem::page_size}, rwx).has_value() &&
+          (*memory)->map_ram({0x3000}, {mem::page_size}, rwx).has_value() &&
+          (*memory)->map_ram({0x4000}, {2 * mem::page_size}, rwx).has_value(),
+      "map noncontiguous executable pages and aliases");
+  require(
+      (*memory)->store<std::uint32_t>({0x1ffc}, 0x34010001).has_value() &&
+          (*memory)->store<std::uint32_t>({0x2000}, 0x34020002).has_value() &&
+          (*memory)->store<std::uint32_t>({0x2004}, 0x70000000).has_value() &&
+          (*memory)->store<std::uint32_t>({0x3000}, 0x34020004).has_value() &&
+          (*memory)->store<std::uint32_t>({0x3004}, 0x70000000).has_value(),
+      "install two-page guest code");
+  let dispatch = jit::memory_dispatcher::create(**memory);
+  require(dispatch.has_value(), "create two-page dispatcher");
+  mips::state state;
+  for (unsigned pass = 0; pass < 2; pass++) {
+    state.pc = {0x1ffc};
+    const let result = (*dispatch)->run_slice(state, 2);
+    require(result && result->compiled == (pass == 0 ? 1u : 0u) &&
+                state.registers[1] == 1 && state.registers[2] == 2,
+            "validate and reuse code spanning noncontiguous physical pages");
+  }
+  require((*memory)->store<std::uint32_t>({0x4000}, 0x34020003).has_value(),
+          "modify the second executable page through its alias");
+  state.pc = {0x1ffc};
+  const let changed = (*dispatch)->run_slice(state, 2);
+  require(changed && changed->compiled == 1 && state.registers[2] == 3,
+          "second-page byte changes invalidate a cached block");
+  require((*memory)->protect({0x2000}, mem::permission::read).has_value(),
+          "revoke second-page execution");
+  state.pc = {0x1ffc};
+  const let denied = (*dispatch)->run_slice(state, 2);
+  require(!denied && denied.error().pc == 0x2000 &&
+              denied.error().access.reason == mem::fault_reason::permission,
+          "cached backing pointers do not bypass revoked execute permissions");
+  require((*memory)->unmap({0x2000}).has_value() &&
+              (*memory)->map_ram({0x2000}, {mem::page_size}, rwx).has_value(),
+          "remap second-page physical backing");
+  state.pc = {0x1ffc};
+  const let remapped = (*dispatch)->run_slice(state, 2);
+  require(remapped && state.registers[2] == 4,
+          "mapping changes replace cached backing pointers before dereference");
+}
+
 fn handoff_boundary() -> void {
   namespace mem = jit::memory;
   std::array<std::byte, mem::page_size> ram{};
@@ -2024,6 +2075,7 @@ fn main(int argc, char **argv) -> int {
   exception_return();
   syscall_exceptions();
   writable_code_dispatch();
+  cross_page_code_validation();
   handoff_boundary();
   register_call();
   register_jump();
