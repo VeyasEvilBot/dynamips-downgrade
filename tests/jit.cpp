@@ -829,6 +829,60 @@ fn byte_stores() -> void {
           "SB reports an unmapped byte address");
 }
 
+fn halfword_accesses() -> void {
+  namespace mem = jit::memory;
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(memory &&
+              (*memory)
+                  ->map_ram({0x8000}, {0},
+                            mem::permission::read | mem::permission::write)
+                  .has_value(),
+          "map halfword RAM");
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{
+      mips::instruction_word{0x34050007}, mips::instruction_word{0xa4220000},
+      mips::instruction_word{0x84230000}, mips::instruction_word{0x94240000},
+      mips::instruction_word{0x34050009}};
+  let block = mips::translate(words, {0x1000}, arena);
+  let compiler = amd64::compiler::create();
+  require(block && compiler &&
+              ir::optimize(*block, ir::fold_constants).has_value(),
+          "translate halfword accesses");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile halfword accesses");
+  for (const std::uint64_t value :
+       {0ULL, 0x7fffULL, 0x8000ULL, 0xffffULL, 0x12345678deadbeefULL}) {
+    std::array<std::uint64_t, 32> state{};
+    state[1] = 0x8ffe;
+    state[2] = value;
+    const let low = static_cast<std::uint16_t>(value);
+    require(native->run(state, **memory).has_value() &&
+                state[3] == static_cast<std::uint64_t>(std::int64_t{
+                                std::bit_cast<std::int16_t>(low)}) &&
+                state[4] == low && state[5] == 9 &&
+                ram[mem::page_size - 2] == static_cast<std::byte>(low >> 8) &&
+                ram[mem::page_size - 1] == static_cast<std::byte>(low & 255),
+            "SH truncates in guest byte order; LH and LHU extend at the page "
+            "boundary");
+  }
+  for (const std::uint64_t address : {0x8fffULL, 0x9000ULL}) {
+    std::array<std::uint64_t, 32> state{};
+    state[1] = address;
+    const let fault = native->run(state, **memory);
+    require(!fault && fault.error().pc == 0x1004 && state[5] == 7 &&
+                fault.error().access.address.value == address &&
+                fault.error().access.size == mem::access_size::half &&
+                fault.error().access.reason ==
+                    (address & 1 ? mem::fault_reason::misaligned
+                                 : mem::fault_reason::unmapped),
+            "halfword faults preserve precise PC, width, address and earlier "
+            "state");
+  }
+}
+
 fn signed_byte_loads() -> void {
   namespace mem = jit::memory;
   std::array<std::byte, mem::page_size> ram{};
@@ -1818,6 +1872,7 @@ fn main(int argc, char **argv) -> int {
   cop0_writes();
   cop0_full_width();
   byte_stores();
+  halfword_accesses();
   signed_byte_loads();
   mmio_console();
   example_program();

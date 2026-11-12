@@ -144,8 +144,9 @@ struct error {
         const let op = word.bits >> 26;
         return (op == 0 &&
                 ((word.bits & 63) == 0x21 || (word.bits & 63) == 0x23)) ||
-               op == 0x09 || op == 0x20 || op == 0x24 || op == 0x23 ||
-               op == 0x28 || op == 0x2b || op == 0x37 || op == 0x3f;
+               op == 0x21 || op == 0x25 || op == 0x29 || op == 0x09 ||
+               op == 0x20 || op == 0x24 || op == 0x23 || op == 0x28 ||
+               op == 0x2b || op == 0x37 || op == 0x3f;
       }));
   if (extra_nodes > std::numeric_limits<std::uint32_t>::max() ||
       words.size() > (std::numeric_limits<std::uint32_t>::max() - extra_nodes) /
@@ -202,9 +203,10 @@ struct error {
     const bool addiu = opcode == 0x09;
     const bool immediate = opcode == 0x0c || opcode == 0x0d || opcode == 0x0e ||
                            lui || addi || addiu || daddiu || slti || sltiu;
-    const bool load =
-        opcode == 0x20 || opcode == 0x24 || opcode == 0x23 || opcode == 0x37;
-    const bool store = opcode == 0x28 || opcode == 0x2b || opcode == 0x3f;
+    const bool load = opcode == 0x21 || opcode == 0x25 || opcode == 0x20 ||
+                      opcode == 0x24 || opcode == 0x23 || opcode == 0x37;
+    const bool store =
+        opcode == 0x29 || opcode == 0x28 || opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
     const bool branch = is_branch(words[i]);
     const bool jump = opcode == 2 || opcode == 3;
@@ -468,14 +470,17 @@ struct error {
         if (!value)
           return failed(value.error());
         if (let written = result.append(
-                opcode == 0x28
+                opcode == 0x29 ? ir::node::store16(*address, *value, source)
+                : opcode == 0x28
                     ? ir::node::store8(*address, *value, source)
                     : ir::node::store(*address, *value, source, size));
             !written)
           return failed(written.error());
       } else {
         const let value = result.append(
-            opcode == 0x24   ? ir::node::load8_unsigned(*address, source)
+            opcode == 0x21   ? ir::node::load16_signed(*address, source)
+            : opcode == 0x25 ? ir::node::load16_unsigned(*address, source)
+            : opcode == 0x24 ? ir::node::load8_unsigned(*address, source)
             : opcode == 0x20 ? ir::node::load8_signed(*address, source)
                              : ir::node::load(*address, source, size));
         if (!value)

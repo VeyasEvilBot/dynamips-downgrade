@@ -67,9 +67,12 @@ enum class opcode : std::uint8_t {
   write_cop0_64,
   load8_signed,
   load8_unsigned,
+  load16_signed,
+  load16_unsigned,
   load32_signed,
   load64,
   store8,
+  store16,
   store32,
   store64,
 };
@@ -78,7 +81,8 @@ constexpr fn produces_value(opcode op) noexcept -> bool {
   return op != opcode::exception_return && op != opcode::write_hilo &&
          op != opcode::syscall && op != opcode::write_cop0_64 &&
          op != opcode::write_cop0 && op != opcode::write_state &&
-         op != opcode::store8 && op != opcode::store32 && op != opcode::store64;
+         op != opcode::store16 && op != opcode::store8 &&
+         op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t {
@@ -280,6 +284,33 @@ struct node {
             source,
             slot,
             opcode::write_cop0_64,
+            width::bits64};
+  }
+
+  static constexpr fn load16_signed(value_id address,
+                                     std::uint32_t source) noexcept -> node {
+    return {{.inputs = {address, {}}},
+            source,
+            {},
+            opcode::load16_signed,
+            width::bits64};
+  }
+
+  static constexpr fn load16_unsigned(value_id address,
+                                       std::uint32_t source) noexcept -> node {
+    return {{.inputs = {address, {}}},
+            source,
+            {},
+            opcode::load16_unsigned,
+            width::bits64};
+  }
+
+  static constexpr fn store16(value_id address, value_id value,
+                               std::uint32_t source) noexcept -> node {
+    return {{.inputs = {address, value}},
+            source,
+            {},
+            opcode::store16,
             width::bits64};
   }
 
@@ -659,10 +690,13 @@ private:
           !operand_valid(current.data.inputs.right))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::load16_signed:
+    case opcode::load16_unsigned:
     case opcode::load8_unsigned:
     case opcode::load8_signed:
     case opcode::load32_signed:
     case opcode::load64:
+    case opcode::store16:
     case opcode::store8:
     case opcode::store32:
     case opcode::store64:
@@ -756,22 +790,28 @@ private:
             std::format_to(out, "  state.write i64 %v{}, %state, {}",
                            current.data.inputs.left.index, current.slot.index);
         break;
+      case opcode::load16_signed:
+      case opcode::load16_unsigned:
       case opcode::load8_unsigned:
       case opcode::load8_signed:
       case opcode::load32_signed:
       case opcode::load64:
         out = std::format_to(out, "  %v{} = load.guest.{} %v{}", i,
-                             current.op == opcode::load8_unsigned  ? "u8"
-                             : current.op == opcode::load8_signed  ? "s8"
-                             : current.op == opcode::load32_signed ? "s32"
-                                                                   : "i64",
+                             current.op == opcode::load16_signed     ? "s16"
+                             : current.op == opcode::load16_unsigned ? "u16"
+                             : current.op == opcode::load8_unsigned  ? "u8"
+                             : current.op == opcode::load8_signed    ? "s8"
+                             : current.op == opcode::load32_signed   ? "s32"
+                                                                     : "i64",
                              current.data.inputs.left.index);
         break;
+      case opcode::store16:
       case opcode::store8:
       case opcode::store32:
       case opcode::store64:
         out = std::format_to(out, "  store.guest i{} %v{}, %v{}",
-                             current.op == opcode::store8    ? 8
+                             current.op == opcode::store16   ? 16
+                             : current.op == opcode::store8  ? 8
                              : current.op == opcode::store32 ? 32
                                                              : 64,
                              current.data.inputs.right.index,

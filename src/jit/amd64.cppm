@@ -169,6 +169,9 @@ private:
     if constexpr (sizeof(T) == 1 && sign_extend)
       return static_cast<std::uint64_t>(
           std::int64_t{std::bit_cast<std::int8_t>(*result)});
+    if constexpr (sizeof(T) == 2 && sign_extend)
+      return static_cast<std::uint64_t>(
+          std::int64_t{std::bit_cast<std::int16_t>(*result)});
     if constexpr (sizeof(T) == 4)
       return static_cast<std::uint64_t>(
           std::int64_t{std::bit_cast<std::int32_t>(*result)});
@@ -383,7 +386,10 @@ public:
         }
         if (node.op == ir::opcode::constant)
           continue;
-        if (node.op == ir::opcode::load8_unsigned ||
+        if (node.op == ir::opcode::load16_signed ||
+            node.op == ir::opcode::load16_unsigned ||
+            node.op == ir::opcode::store16 ||
+            node.op == ir::opcode::load8_unsigned ||
             node.op == ir::opcode::load8_signed ||
             node.op == ir::opcode::load32_signed ||
             node.op == ir::opcode::load64 || node.op == ir::opcode::store8 ||
@@ -399,7 +405,11 @@ public:
             if (errors.code)
               return failure(errors.code, i);
             values[i] = result;
-            const let target = node.op == ir::opcode::load8_unsigned
+            const let target = node.op == ir::opcode::load16_signed
+                                   ? &compiled_block::load<std::uint16_t>
+                               : node.op == ir::opcode::load16_unsigned
+                                   ? &compiled_block::load<std::uint16_t, false>
+                               : node.op == ir::opcode::load8_unsigned
                                    ? &compiled_block::load<std::uint8_t, false>
                                : node.op == ir::opcode::load8_signed
                                    ? &compiled_block::load<std::uint8_t>
@@ -418,7 +428,9 @@ public:
             const let value = operand(node.data.inputs.right);
             if (!value)
               return failure(value.error(), i);
-            const let target = node.op == ir::opcode::store8
+            const let target = node.op == ir::opcode::store16
+                                   ? &compiled_block::store<std::uint16_t>
+                               : node.op == ir::opcode::store8
                                    ? &compiled_block::store<std::uint8_t>
                                : node.op == ir::opcode::store32
                                    ? &compiled_block::store<std::uint32_t>
@@ -768,10 +780,13 @@ public:
         case ir::opcode::read_cop0:
         case ir::opcode::write_cop0:
         case ir::opcode::write_state:
+        case ir::opcode::load16_signed:
+        case ir::opcode::load16_unsigned:
         case ir::opcode::load8_unsigned:
         case ir::opcode::load8_signed:
         case ir::opcode::load32_signed:
         case ir::opcode::load64:
+        case ir::opcode::store16:
         case ir::opcode::store8:
         case ir::opcode::store32:
         case ir::opcode::store64:
