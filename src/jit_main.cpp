@@ -64,6 +64,8 @@ fn dispatch_message(const jit::dispatch_error &error) noexcept
     return "executable RAM has a writable alias";
   case jit::dispatch_error_code::compilation:
     return jit::amd64::message(error.compilation);
+  case jit::dispatch_error_code::execution:
+    return jit::amd64::message({error.execution});
   case jit::dispatch_error_code::memory:
     return fault_name(error.access.reason);
   case jit::dispatch_error_code::out_of_memory:
