@@ -145,7 +145,7 @@ public:
     invalidate();
   }
 
-  // Immutable instruction images cannot have writable physical aliases.
+  // Sealed execution uses static mappings without writable physical aliases.
   [[nodiscard]] fn seal_executable_pages() noexcept
       -> std::expected<void, mapping_error> {
     for (const let &entry : mappings_)
@@ -154,7 +154,10 @@ public:
           !compatible_code(entry.address, entry.physical, entry.permissions,
                            true))
         return std::unexpected(mapping_error::physical_conflict);
-    sealed_code_ = true;
+    if (!sealed_code_) {
+      sealed_code_ = true;
+      invalidate();
+    }
     return {};
   }
 
@@ -535,6 +538,12 @@ private:
     clear_reservation();
     if (batch_) {
       batch_->enqueue(address);
+      if (sealed_code_ && translate_)
+        batch_->full = true;
+      return;
+    }
+    if (sealed_code_ && translate_) {
+      invalidate();
       return;
     }
     invalidate_page(address);
@@ -614,6 +623,14 @@ private:
         return resolved_access{nullptr, translated->target,
                                translated->physical};
       if (!translated->host_page || translated->target)
+        return std::unexpected(
+            fault{address, fault_reason::permission, access, size});
+      if (sealed_code_ && (access == access_kind::execute ||
+                           (access == access_kind::write &&
+                            !compatible_code(base,
+                                             {translated->physical.value &
+                                              ~std::uint64_t{page_size - 1}},
+                                             permission::write, true))))
         return std::unexpected(
             fault{address, fault_reason::permission, access, size});
       const cache_entry cached{base.value | 1, translated->host_page};

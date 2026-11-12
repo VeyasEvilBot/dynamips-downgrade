@@ -1,20 +1,37 @@
-# Dynamips embedding experiment
+# Dynamips emulator rewrite
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/tethux/dynamips-downgrade.svg)](https://pkg.go.dev/github.com/tethux/dynamips-downgrade)
 
-This fork gives Tethux a typed C, C++23, and Go API for the stable Dynamips
-emulator. The public Go package is at the repository root. The old TCP
-hypervisor remains as a separate target for behavior comparisons; the
-embedding library does not link against its command handlers. The required,
-deferred, and legacy-only API scope lives in
-[`bindings/schema/`](bindings/schema/).
+This is an experimental rewrite of Dynamips into a small, composable C++23
+emulator for Tethux. The aim is a slim C++ core with native modules, a shared
+MIPS IR, and an AsmJit backend. A roughly 20k-line emulator is a design ambition,
+not the current size or a reason to sacrifice correct device behavior.
 
-This is an experimental, AI-assisted learning project. AI agents helped with
-the binding backfill, refactor, and tests. I am using it to learn the emulator
-and improve my development workflow. I do not claim this work is better than
-the years of engineering behind Dynamips. I am having fun, and my long-term
-goal is to rewrite most of the code into a smaller emulator containing only
-what I need.
+Tethux manages workloads and virtualization orchestration. Dynamips executes
+the guest and models its hardware:
+
+| Responsibility | Owner |
+| --- | --- |
+| Topology, inventory, placement and provider orchestration | Tethux |
+| Storage-directory leases, port allocation and external Ethernet fabric | Tethux |
+| CPU execution, guest memory, address translation and interrupts | Dynamips |
+| Chassis, cards, devices, console and device-attached network endpoints | Dynamips |
+| Native machine lifetime and reading/writing native state files | Dynamips |
+
+Tethux chooses storage locations and connects workloads. Native machine objects
+still need explicit creation, reset, stop and teardown inside the emulator.
+The rewrite does not aim to reproduce the old TCP hypervisor's orchestration.
+
+Two implementations coexist. The new core in `src/` is a standalone bring-up
+path. The existing C/C++ core and root Go package remain the current Tethux
+integration; the Go bindings have **not** switched to the new JIT. Their public
+ownership contracts are documented in [`bindings/README.md`](bindings/README.md)
+and [`bindings/schema/`](bindings/schema/).
+
+This is an AI-assisted learning project. AI agents helped with the binding
+backfill, refactor and tests. I am using it to learn the emulator and improve my
+development workflow. I do not claim this work is better than the years of
+engineering behind Dynamips.
 
 Christophe Fillot created Dynamips. Fabien Devaux, MtvE, Gordon Russell,
 Jeremy Grossmann, Flávio J. Saraiva, GNS3, and other contributors maintained
@@ -22,201 +39,144 @@ and extended it. Daniel Lintott converted an earlier README to Markdown. The
 repository includes [`LICENSE`](LICENSE); individual source files also carry
 their own notices.
 
-## Build and test
+## Rewrite checkpoint
 
-The project uses xmake, C23 and C++23. Release builds use Clang 19 and
-libstdc++ 14 on Ubuntu 24.04. Install libelf and libpcap development files to
-build the native code. Then run:
+Verified on Linux amd64 on 2026-11-12 with a C7200 NPE-400 and IOS
+12.4(24)T5: the guest decompresses its image, hands off to the IOS kernel,
+sets up mappings and prints:
 
-```sh
-mise run build
-mise run test
-mise run lint:go
-mise run lint:cpp
+```text
+Cisco IOS Software, 7200 Software (C7200-ADVENTERPRISEK9-M), Version 12.4(24)T5, RELEASE SOFTWARE (fc3)
 ```
 
-`mise run test` builds the native libraries and legacy executable, runs every
-registered xmake test (C++ module lifecycle, JIT and guest memory), then runs the
-Go tests against the freshly installed libraries, including legacy parity.
-Native tests print a pass/fail summary and show diagnostics on failure. Register
-new native suites with `add_tests` in their xmake target to include them here.
-Use `test:native`, `test:jit`, `test:memory` or `test:go` for a focused run;
-`test:core` runs JIT and memory together. Benchmarks remain separate, and IOS boot
-tests require `DYNAMIPS_IOS_ARCHIVE` (see `test:ios` below).
-`mise run lint:cpp` runs cppcheck on the new C/C++ embedding boundary
-and clang-tidy on `bindings/*.cpp`. It requires `clang-tidy`; mise provides
-cppcheck. The C++23 module partitions are checked by the Clang build because
-xmake's compilation database does not currently include their module commands
-for clang-tidy. xmake compiles with 14 parallel jobs by default here; set
-`DYNAMIPS_BUILD_JOBS` to change the task setting. Use `mise run fmt:go` for Go
-formatting and tidying both Go modules. `mise run lint:cpp:ports` checks the
-migrated utility, packet, UDP and console C++ sources with strict
-conversion/pedantic warnings as errors
-and focused Clang analysis. Run `mise run compiledb` to prepare clangd.
+This is a boot checkpoint, not a complete IOS boot, working CLI or network
+validation. The next observed stop is an unimplemented I/O FPGA DS1620
+temperature-control access at physical address `0x1e84020c`, guest PC
+`0x6021da10`. Missing PCMCIA identification also produces a warning before the
+banner. Cisco images are not distributed here.
 
-## JIT playground
+| Area | Implemented in the new core | Remaining limits |
+| --- | --- | --- |
+| CPU/JIT | MIPS64 integer operations, branches and delay slots, HI/LO, CP0, LL/SC, COP1 bit and memory transfers | Incomplete ISA; no full floating-point implementation |
+| IR | Compact 16-byte nodes, bounded storage, readable printing and optimization passes | More lowering and optimization work remains |
+| Memory | Big-endian RAM/MMIO, two-level translation cache, architectural TLB setup/probe, batched invalidation | Complete guest TLB exception/refill behavior remains |
+| Code dispatch | Native AMD64 blocks, writable guest code, byte-change checks and CACHE maintenance | More profiling and architectural validation needed |
+| Machine | ELF/ZIP loading, bundled ROM, NPE-400 geometry, ROMMON variables | Boot bring-up only; persistence parity is not established |
+| Devices | Queued SCN2681 console/aux, EEPROM reads, FPGA startup registers, GT64120 PCI configuration and built-in bridges | DS1620, PCMCIA, DMA, cards and packet delivery remain |
+| Time | CP0 Count/Compare and eligible interrupt delivery at block boundaries | Virtual instruction-based timing, not cycle accuracy |
 
-`mise run run:jit` runs a native-compiled MIPS program that stores two 64-bit
-operands in RAM, loads and adds them, and checks the stored result using a
-negative-offset load and XOR. It builds a word-sized text buffer in RAM and
-transmits `sum=6` through the MMIO console, reading ready status before each
-write. The final summary shows the sum, readback check and saved status.
-The readable instruction recipe is in `src/jit/example.cppm`; it uses only the
-existing instruction subset, so transmission is unrolled rather than a loop.
-Use `mise run run:jit -- --dump-ir --registers` to inspect IR and final registers.
-Hexadecimal instruction words may follow the options to replace the example.
+Unsupported operations report typed failures. Reaching the banner does not
+prove that other images, networking, persistence or teardown are ready.
 
-The harness loads and fetches big-endian code at `0x1000`, maps data RAM at
-`0x2000`, and maps console word registers at `0x8000` (TX) and `0x8004` (ready).
-UART TX and RX each use a bounded 1024-byte FIFO. Status bit 0 indicates TX
-space and bit 1 indicates received data; RX is at `0x8008`. Device owners feed
-RX through `receive()` and drain TX at execution boundaries. Partial drains
-retain the unwritten suffix; a blocked sink yields without spinning. The shared
-`jit.fifo` module can serve other byte-stream devices. It has one owner and does
-not synchronize concurrent producers or consumers.
+## Build and run
 
-The playground drains UART output after at most 64 dispatched blocks and flushes
-host output once per nonempty drain. Programs contain at most 1024 instruction
-words and execute with a one-million-instruction budget, stopping at block
-boundaries. Supported instructions are NOP, BEQ, BNE, ORI, XOR, DADDU, LW, SW,
-LD and SD. Branches execute one delay slot; faults in that slot also report the
-branch PC. Faults retain earlier effects and stop later instructions.
-
-Dispatch caches native blocks for an immutable instruction image. Writable
-aliases of executable RAM are rejected. Mapping changes invalidate cached
-blocks; changed instruction bytes require a new dispatcher. Direct host writes
-to executable backing while dispatch is active are forbidden. Architectural
-instruction-cache operations and self-modifying guest code remain future work.
-Mapping owners may use `apply_updates()` to batch and deduplicate cache
-invalidations before resuming execution; earlier successful updates remain
-applied if a later update fails.
-
-Memory IR currently calls typed C++ helpers; inline JIT RAM-cache probing and
-architectural MIPS exceptions remain future work.
-
-`jit.devices` supplies a fixed-capacity MMIO bus. Register devices with a physical
-byte range, supported widths, register byte order, and optional reset/service
-hooks, then map `bus.endpoint()` through guest memory. Registration freezes when
-the endpoint is exposed. The bus borrows devices and hook contexts; keep them
-and the bus alive until guest memory and execution stop using them. Reset and
-service run with guest execution stopped. Reset does not reset CPU or RAM.
-
-`jit.execution` services devices before and after each bounded dispatch slice,
-including after a guest fault. A service failure before execution leaves the CPU
-untouched. A guest fault and a subsequent service failure are both reported.
-Service errors stop the run, and servicing stops at the first failing device.
-Guest state may already have advanced when post-service fails; completed dispatch
-counters are returned only on success. Backpressure is successful servicing
-with queued work retained, rather than a service error.
-Hooks retain pending I/O on backpressure and should enqueue or poll transport
-work rather than wait for input. No device callback performs host I/O on a guest
-load or store.
-
-Try the guest RX-to-TX echo path with supplied UTF-8 bytes:
+Use xmake, Clang with C++23 module support, and a C++23 standard library.
+Install libelf and libpcap development files. The xmake configuration resolves
+the other declared dependencies, including AsmJit, Asio, zlib and minizip.
+The new native backend currently targets Linux amd64.
 
 ```nu
-mise run run:jit -- --echo "hello devices"
-mise run run:jit -- --echo "hello" --dump-ir --registers
+mise run run:c7200 -- --ios /path/to/c7200-ios.zip
 ```
 
-The echo guest polls status, consumes RX, and transmits each byte through TX.
-Input streams into the bounded RX FIFO between execution slices. This CLI uses
-`std::print`/`std::println` for diagnostic output. For live input, start a
-single-client Unix console in one terminal and connect from another:
+This task builds an isolated release profile in `tools/boot-release`, leaving
+the development configuration available for clangd. ELF images are also
+accepted. `--stop-at-handoff` stops before kernel execution; `--budget N` limits
+execution for diagnosis. Without a budget it runs until a stop or failure.
+Use `run:c7200:dev` to run the current development configuration instead.
+
+For development, prepare module consumers and the compilation database, then
+run the focused checks for the behavior being changed:
+
+```nu
+mise run compiledb
+mise run test:core
+mise run test:console
+mise run test:machine
+mise run test:boot
+mise run lint:cpp:jit ::: lint:clangd
+```
+
+`test:boot` rebuilds the CPU and machine consumers together before testing.
+`test:core` covers JIT, memory and device suites; `test:console` uses real Unix
+streams. Run the real IOS command after boot-path changes and record the next
+concrete blocker. A boot does not replace packet, persistence or teardown tests.
+
+`mise run test` builds the legacy libraries and executable, runs registered
+native tests and runs Go tests against freshly installed native archives.
+`mise run check` combines repository policy, lint and test tasks. Use focused
+tasks during iteration; benchmarks remain separate. `mise run compiledb`
+prepares the module compilation database used by clangd and Clang analysis.
+
+## Core layout and execution contracts
+
+`src/jit/` owns decoding, IR, optimization, native emission, dispatch and guest
+memory. `src/machine/` composes the chassis, image loading and boot state.
+`src/devices/` models hardware; `src/host/` supplies owned host resources and
+Asio console transport. `modules/asmjit.cppm` wraps the emitter dependency.
+
+CPU and device execution have one owner. Guest loads and stores use cached
+translation and typed cold-path failures. Mapping owners can batch invalidations
+before resuming execution. The architectural TLB is distinct from the host
+translation caches. Memory IR currently calls C++ helpers; inline native RAM
+cache probes remain future work.
+
+Devices use bounded FIFOs and run service hooks between bounded execution
+slices. MMIO callbacks do not perform host I/O. Asio transport stages bytes and
+retains unwritten data through partial writes and backpressure. Shutdown must
+settle callbacks before releasing their buffers. Device and memory mappings
+borrow their backing objects, which must outlive execution.
+
+The immutable playground dispatcher requires sealed executable backing and
+rejects writable aliases. The chassis uses writable-code dispatch with bounded
+byte comparisons and mapping invalidation. Direct host writes must obey the
+selected dispatch and LL/SC reservation contracts; borrowed memory is not a
+concurrently writable interface.
+
+## JIT and device playground
+
+The small harness exercises native MIPS translation, RAM and queued MMIO UART
+without a Cisco image. Inspect its IR and registers, supply instruction words,
+or run an RX-to-TX echo guest:
+
+```nu
+mise run run:jit -- --dump-ir --registers
+mise run run:jit -- --echo "hello devices"
+```
+
+The default example is in `src/jit/example.cppm`. The harness maps code at
+`0x1000`, RAM at `0x2000`, and console TX/status/RX word registers at
+`0x8000`, `0x8004` and `0x8008`. TX and RX each have a bounded 1024-byte FIFO.
+The shared FIFO has one owner, without concurrent producer/consumer support.
+
+For a live Unix console, run the first command in one terminal and the second
+in another:
 
 ```nu
 mise run run:jit -- --console /tmp/dynamips-console.sock
 socat STDIO UNIX-CONNECT:/tmp/dynamips-console.sock
 ```
 
-`--console` runs a polling echo guest until the client half-closes its input and
-all received bytes have been echoed. Ctrl-C or SIGTERM stops the server and
-cancels pending I/O. The listener refuses existing paths and removes its own
-socket on shutdown. A new invocation starts a new session; reconnection is not
-part of this first version.
+The echo session finishes after the client half-closes input and queued output
+is drained. Ctrl-C or SIGTERM cancels pending I/O. The listener refuses existing
+paths and removes its own socket on shutdown. This playground session does not
+support reconnecting clients.
 
-The `host.console` transport owns its Asio reactor and two 8 KiB staging buffers.
-The UART adapter in `src/devices/console.cppm` transfers bytes between those
-buffers and the device FIFOs only at service boundaries. RX pauses while staged
-input is waiting; TX keeps its unwritten suffix through partial completions.
-Shutdown settles cancellation callbacks before buffers are destroyed. Asio may
-allocate operation state; the payload buffers and queues do not grow. Guest
-time and interrupt delivery remain separate next steps.
-
-Reusable host helpers live in `src/host/`: `native_fd` owns and duplicates file
-descriptors, while `host_memory` owns file buffers and aligned allocations.
-Both legacy core and JIT targets share these module objects. The playground
-reserves aligned RAM through the C++ API; `common/host_memory_compat.cpp` retains
-`m_read_file` and `m_memalign` for existing C callers. Existing native archives
-and linker flags remain sufficient.
-
-Focused checks are available without building the Go bindings:
-
-```nu
-mise run test:devices # FIFO, UART backpressure and native dispatch integration
-mise run test:core    # all JIT, device and guest-memory tests
-mise run test:host    # direct C++ host helpers and real C compatibility callers
-mise run test:console # real Unix streams, guest echo, backpressure and cancellation
-mise run check        # policies, native lint, clangd and all native/Go tests
-mise run run:jit -- --dump-ir --registers
-```
-
-The device test runs a real native-compiled guest loop that sends more bytes than
-fit in the FIFO, starts with TX full, and verifies byte order while the host
-accepts short writes and temporarily blocks. Device-bus tests additionally cover
-streamed RX-to-TX echo, register routing, byte order, reset and service failures.
-Core tests also check instruction
-fetch faults across unmapped and non-executable pages, including delay slots.
-
-## C++ chassis boot probe
-
-`machine.core` owns the CPU state, aligned RAM/ROM backing, direct-mapped KSEG0
-and KSEG1 aliases, device bus and ROM dispatcher. A chassis supplies a small
-`machine::definition` and optional `machine::attachment` entries; it does not
-repeat memory allocation, firmware copying, reset or execution-loop setup.
-`machine.c7200` defines the NPE-400/R7000 profile and its hardware register
-windows. Window identifiers such as `c7200::io_fpga` select attachments using
-the existing typed device descriptor. Device objects and hook contexts remain
-owned by the caller and must outlive the machine. Model names and window tables
-are borrowed immutable data; the built-in profile has static storage.
-
-```nu
-mise run run:c7200
-mise run run:c7200 -- --rom /path/to/rom.elf --ios /path/to/ios.image
-mise run test:machine
-```
-
-The probe defaults to the real bundled `stable/mips64_microcode` ELF. Firmware
-loading uses libelf and the shared C++ file helper, checks ELF32 big-endian MIPS
-metadata and section bounds, copies allocated sections, and zeros BSS. IOS
-sections must fit base RAM. The initial NPE-400 profile uses 256 MiB base RAM
-and 4 MiB protected ROM. Missing device windows fault rather than returning
-invented register values. Warm reset clears CPU/device state while retaining RAM
-and loaded firmware.
-
-This is a chassis and boot-path foundation, not a successful IOS boot. The
-current probe stops at reset PC `0xffffffffbfc00000` on `0x0ff004a8` (JAL).
-Exit status 2 reports blocked or budget-limited execution. CP0, general TLB
-translation, C7200 controllers and RAM-code dispatch remain unimplemented.
-Configured processor identity is model metadata, not an implemented CP0 PRID
-register. The ROM dispatcher currently supports an immutable contiguous boot
-window of at most 65536 words; larger images are rejected explicitly. The legacy
-emulator and its public C/Go contracts remain unchanged.
-
-## Go consumers
+## Legacy-core Go consumers
 
 Native binaries are distributed as Linux amd64 GitHub release assets, not in
 the Go module. Install a C/C++ compiler, pkg-config, and libelf, libpcap and
 libnsl development libraries. Download the matching native release:
 
-```sh
-version=0.2.28
-curl -fLO "https://github.com/tethux/dynamips-downgrade/releases/download/v${version}/dynamips-downgrade_${version}_linux_amd64.tar.gz"
-curl -fLO "https://github.com/tethux/dynamips-downgrade/releases/download/v${version}/checksums.txt"
+```nu
+let version = "0.2.28"
+curl -fLO $"https://github.com/tethux/dynamips-downgrade/releases/download/v($version)/dynamips-downgrade_($version)_linux_amd64.tar.gz"
+curl -fLO $"https://github.com/tethux/dynamips-downgrade/releases/download/v($version)/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt
-mkdir -p "$HOME/.local/dynamips/$version"
-tar -xzf "dynamips-downgrade_${version}_linux_amd64.tar.gz" -C "$HOME/.local/dynamips/$version"
-export PKG_CONFIG_PATH="$HOME/.local/dynamips/$version/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+let prefix = ($nu.home-path | path join ".local" "dynamips" $version)
+mkdir $prefix
+tar -xzf $"dynamips-downgrade_($version)_linux_amd64.tar.gz" -C $prefix
+$env.PKG_CONFIG_PATH = ($prefix | path join "lib" "pkgconfig")
 go get github.com/tethux/dynamips-downgrade@v0.2.28
 ```
 
@@ -246,11 +206,11 @@ The file `pkgconfig/dynamips-bindings.pc` tells `pkg-config` where the installed
 headers and archives are and which libraries a final link needs. Xmake installs
 it alongside both static archives:
 
-```sh
+```nu
 mise exec -- xmake f -m release -y
 mise exec -- xmake build -y dynamips-bindings
 mise exec -- xmake install -o /path/to/prefix dynamips-bindings dynamips-core
-PKG_CONFIG_PATH=/path/to/prefix/lib/pkgconfig pkg-config --cflags --libs dynamips-bindings
+with-env {PKG_CONFIG_PATH: /path/to/prefix/lib/pkgconfig} { pkg-config --cflags --libs dynamips-bindings }
 ```
 
 Set `PKG_CONFIG_PATH` to that directory for native consumers using the
@@ -282,7 +242,7 @@ API reference: [dynamips](https://pkg.go.dev/github.com/tethux/dynamips-downgrad
 [example command](https://pkg.go.dev/github.com/tethux/dynamips-downgrade/examples/basic).
 Read the current API locally with:
 
-```sh
+```nu
 mise exec -- go doc github.com/tethux/dynamips-downgrade
 mise exec -- go doc github.com/tethux/dynamips-downgrade/errs
 ```
@@ -290,23 +250,22 @@ mise exec -- go doc github.com/tethux/dynamips-downgrade/errs
 The [C7200 example](examples/basic/README.md) takes a local IOS image or zip
 archive and opens its console:
 
-```sh
-DYNAMIPS_IOS_IMAGE=/path/to/c7200-ios.zip mise run run:example
+```nu
+with-env {DYNAMIPS_IOS_IMAGE: /path/to/c7200-ios.zip} { mise run run:example }
 ```
 
 The same terminal opens the IOS console. Press Enter after IOS boots, type
 commands there, then press Ctrl+] and enter `quit` when finished.
 
-## IOS integration and current performance
+## Legacy-core IOS integration and performance
 
 [`ios_boot_test.go`](internal/binding/ios_boot_test.go) boots a C7200 image
 through both the embedded Go API and the old TCP hypervisor. It verifies IOS
 commands, interface output, a hostname change and the resulting running config.
 Cisco images are not distributed here:
 
-```sh
-DYNAMIPS_IOS_ARCHIVE=/path/to/c7200-ios.zip DYNAMIPS_IOS_RAM_MB=256 \
-  mise run test:ios
+```nu
+with-env {DYNAMIPS_IOS_ARCHIVE: /path/to/c7200-ios.zip, DYNAMIPS_IOS_RAM_MB: "256"} { mise run test:ios }
 ```
 
 The task tests freshly built amd64 native libraries through pkg-config, with
@@ -334,32 +293,19 @@ shutdown were also verified during the Asio migrations. Focused native tests
 passed ASan/UBSan and relevant TSan checks. Full emulator UBSan remains limited
 by existing JIT operations; a boot alone does not prove networking or teardown.
 
-## Roadmap
+## Next rewrite steps
 
-The bindings are a bridge to a smaller emulator. `unstable/` is already gone,
-and the old TCP hypervisor is isolated from the embedding library. Possible
-next steps are:
-
-1. Retire the hypervisor after the required API and IOS parity checks cover
-   the workflows Tethux uses. Drop unused host JIT targets as the supported
-   host and guest platforms become explicit.
-2. Extend Asio only where remaining backends need it. UDP NIO reception and
-   native console transport already use asynchronous Asio I/O; console device
-   notifications remain on the native console thread. Timers and periodic tasks
-   already have C++ implementations. Keep CPU execution separate from I/O.
-3. Continue bounded utility migrations where a real consumer benefits. Registry,
-   ROMMON, host file/alignment helpers and pure packet/address/checksum helpers
-   already expose C++ mechanisms with compatible C boundaries. Retained C code
-   and constant tables are not migration targets just to reduce file counts.
-4. Make Cisco chassis, slots, cards, IRQ routing, and common FPGA register
-   layouts mostly data-driven. Share PCI, MMIO, memory-map, and device
-   lifecycle infrastructure, but keep genuinely different chip behavior in
-   separate implementations.
-5. Rewrite the remaining CPU, device, and networking code in tested slices.
-   Consider a common guest IR and a maintained code emitter only after the
-   supported JIT paths are measured. End with directories organized by
-   runtime, CPU, devices, network, Cisco platforms, and console rather than
-   the historical `common/` and `stable/` split.
+1. Implement the DS1620 temperature-control behavior and PCMCIA identification,
+   using the next real IOS stop to choose a bounded piece of work.
+2. Extend missing CPU instructions, guest exceptions and device interrupts with
+   focused semantic tests and real-image checks.
+3. Add card and network-device behavior on the existing MMIO/service contracts,
+   then verify actual packet delivery, shutdown and persistence.
+4. Integrate the new core into Tethux through a small explicit lifecycle API
+   once those contracts work. Keep topology and provider orchestration in Tethux.
+5. Retire legacy implementations only after their required consumers use the
+   replacement. Reuse useful C++ helpers; do not port utilities just to reduce
+   the number of C files.
 
 ## Architecture checks
 

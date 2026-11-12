@@ -154,7 +154,7 @@ fn fifo_io() -> void {
 
 fn translated_cache() -> void {
   std::array<std::byte, mem::page_size> ram{};
-  let space = mem::address_space::create(ram, 0);
+  let space = mem::address_space::create(ram, 2);
   require(space.has_value(), "create translated address space");
 
   struct state {
@@ -190,6 +190,37 @@ fn translated_cache() -> void {
   require(!denied && denied.error().reason == mem::fault_reason::permission &&
               (*space)->load<std::uint32_t>({0x60000000}) == 42,
           "invalidation rechecks write permissions without modifying RAM");
+  backing.writable = true;
+  const let rx = mem::permission::read | mem::permission::execute;
+  require((*space)->store<std::uint32_t>({0x60000000}, 42).has_value() &&
+              (*space)->map_ram({0x1000}, {0}, rx).has_value() &&
+              (*space)->seal_executable_pages().has_value(),
+          "seal code after warming a translated writable alias");
+  const let alias = (*space)->store<std::uint32_t>({0x60000000}, 99);
+  require(!alias && alias.error().reason == mem::fault_reason::permission &&
+              (*space)->fetch<std::uint32_t>({0x1000}) == 42 &&
+              !(*space)->fetch<std::uint32_t>({0x60000000}),
+          "sealed code rejects translated writes and requires static execution "
+          "mappings");
+  require((*space)->unmap({0x1000}).has_value() &&
+              (*space)->store<std::uint32_t>({0x60000000}, 43).has_value() &&
+              (*space)->map_ram({0x1000}, {0}, rx).has_value() &&
+              !(*space)->store<std::uint32_t>({0x60000000}, 99) &&
+              (*space)->fetch<std::uint32_t>({0x1000}) == 43,
+          "new sealed mappings invalidate warm translated aliases");
+  const std::array remove{
+      mem::mapping_update{mem::update_kind::unmap, {0x1000}}};
+  const let removed = (*space)->apply_updates(remove);
+  require(removed && removed->full_flush &&
+              (*space)->store<std::uint32_t>({0x60000000}, 44).has_value(),
+          "batched unmapping flushes translated aliases");
+  const std::array install{
+      mem::mapping_update{mem::update_kind::ram, {0x2000}, {0}, rx}};
+  const let installed = (*space)->apply_updates(install);
+  require(installed && installed->full_flush &&
+              !(*space)->store<std::uint32_t>({0x60000000}, 99) &&
+              (*space)->fetch<std::uint32_t>({0x2000}) == 44,
+          "batched code mappings protect backing after a full cache flush");
 }
 
 fn reservations() -> void {
