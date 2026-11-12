@@ -357,6 +357,31 @@ public:
     return {};
   }
 
+  // A single-page byte write. Device partial writes need an explicit bus
+  // contract.
+  [[nodiscard]] fn store_bytes(virtual_address address,
+                                std::span<const std::byte> bytes) noexcept
+      -> std::expected<void, fault> {
+    if (bytes.empty())
+      return {};
+    if (bytes.size() > page_size - (address.value & (page_size - 1)))
+      return std::unexpected(fault{address, fault_reason::unsupported_size,
+                                   access_kind::write, access_size::byte});
+    if (const let cached = lookup<access_kind::write>(address)) {
+      std::memmove(cached->host_page + (address.value & (page_size - 1)),
+                   bytes.data(), bytes.size());
+      return {};
+    }
+    const let target = resolve(address, access_kind::write, access_size::byte);
+    if (!target)
+      return std::unexpected(target.error());
+    if (target->target)
+      return std::unexpected(fault{address, fault_reason::unsupported_size,
+                                   access_kind::write, access_size::byte});
+    std::memmove(target->host, bytes.data(), bytes.size());
+    return {};
+  }
+
 private:
   struct invalidation_batch {
     address_space &owner;

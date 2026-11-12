@@ -200,6 +200,19 @@ fn main() -> int {
   require(created.has_value(), "create bounded address space");
   let &memory = **created;
   require(memory.map_ram({0}, {0}, rw).has_value(), "map first RAM page");
+  const std::array bytes{std::byte{1}, std::byte{2}, std::byte{3}};
+  require(
+      memory.store_bytes({8}, bytes).has_value() &&
+          memory.store_bytes({9}, std::span{ram}.subspan(8, 3)).has_value() &&
+          ram[8] == std::byte{1} && ram[9] == std::byte{1} &&
+          ram[10] == std::byte{2} && ram[11] == std::byte{3},
+      "byte writes support overlapping borrowed input");
+  const let unchanged = ram;
+  const let crossing = memory.store_bytes({mem::page_size - 2}, bytes);
+  require(!crossing &&
+              crossing.error().reason == mem::fault_reason::unsupported_size &&
+              ram == unchanged,
+          "single-page byte writes reject page crossing before changing RAM");
   roundtrip(memory, std::uint8_t{0xab});
   roundtrip(memory, std::uint16_t{0xabcd});
   roundtrip(memory, std::uint32_t{0x12345678});

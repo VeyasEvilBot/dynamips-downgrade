@@ -225,6 +225,27 @@ private:
     }
   }
 
+  template <bool Right>
+  static fn store_merge32(execution_context *context, std::uint64_t address,
+                           std::uint64_t value) noexcept -> void {
+    const let offset = static_cast<unsigned>(address & 3);
+    const let begin = Right ? 0u : offset;
+    const let count = Right ? offset + 1 : 4 - offset;
+    std::array<std::byte, 4> bytes;
+    for (unsigned i = 0; i < count; i++) {
+      const let shift = (Right ? count - 1 - i : 3 - i) * 8;
+      bytes[i] = static_cast<std::byte>((value >> shift) & 255);
+    }
+    const let stored = context->memory->store_bytes(
+        {(address & ~std::uint64_t{3}) + begin}, std::span{bytes}.first(count));
+    if (!stored) {
+      context->fault = stored.error();
+      context->fault.address.value = address;
+      context->fault.size = memory::access_size::word;
+      context->failed = true;
+    }
+  }
+
   static fn tlb_operation(execution_context *context,
                            std::uint32_t operation) noexcept -> void {
     let &cp0 = *context->cop0;
@@ -604,6 +625,8 @@ public:
             node.op == ir::opcode::load8_signed ||
             node.op == ir::opcode::load32_signed ||
             node.op == ir::opcode::load64 || node.op == ir::opcode::store8 ||
+            node.op == ir::opcode::store32_left ||
+            node.op == ir::opcode::store32_right ||
             node.op == ir::opcode::store32 || node.op == ir::opcode::store64) {
           uses_memory = true;
           const let address = operand(node.data.inputs.left);
@@ -639,7 +662,11 @@ public:
             const let value = operand(node.data.inputs.right);
             if (!value)
               return failure(value.error(), i);
-            const let target = node.op == ir::opcode::store16
+            const let target = node.op == ir::opcode::store32_left
+                                   ? &compiled_block::store_merge32<false>
+                               : node.op == ir::opcode::store32_right
+                                   ? &compiled_block::store_merge32<true>
+                               : node.op == ir::opcode::store16
                                    ? &compiled_block::store<std::uint16_t>
                                : node.op == ir::opcode::store8
                                    ? &compiled_block::store<std::uint8_t>
@@ -1055,6 +1082,8 @@ public:
         case ir::opcode::load64:
         case ir::opcode::store16:
         case ir::opcode::store8:
+        case ir::opcode::store32_left:
+        case ir::opcode::store32_right:
         case ir::opcode::store32:
         case ir::opcode::store64:
           break;

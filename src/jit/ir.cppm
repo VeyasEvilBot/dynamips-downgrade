@@ -88,6 +88,8 @@ enum class opcode : std::uint8_t {
   store8,
   store16,
   store32,
+  store32_left,
+  store32_right,
   store64,
 };
 
@@ -100,6 +102,7 @@ constexpr fn produces_value(opcode op) noexcept -> bool {
          op != opcode::write_cop1_64 && op != opcode::write_cop0_64 &&
          op != opcode::write_cop0 && op != opcode::write_state &&
          op != opcode::store16 && op != opcode::store8 &&
+         op != opcode::store32_left && op != opcode::store32_right &&
          op != opcode::store32 && op != opcode::store64;
 }
 
@@ -459,6 +462,16 @@ struct node {
             source,
             {},
             size == width::bits32 ? opcode::load32_signed : opcode::load64,
+            width::bits64};
+  }
+
+  static constexpr fn store_merge32(value_id address, value_id value,
+                                     bool right, std::uint32_t source) noexcept
+      -> node {
+    return {{.inputs = {address, value}},
+            source,
+            {},
+            right ? opcode::store32_right : opcode::store32_left,
             width::bits64};
   }
 
@@ -858,6 +871,8 @@ private:
     case opcode::load64_right:
     case opcode::store16:
     case opcode::store8:
+    case opcode::store32_left:
+    case opcode::store32_right:
     case opcode::store32:
     case opcode::store64:
       if (current.type != width::bits64)
@@ -1014,6 +1029,13 @@ private:
                              : current.op == opcode::load32_signed   ? "s32"
                                                                      : "i64",
                              current.data.inputs.left.index);
+        break;
+      case opcode::store32_left:
+      case opcode::store32_right:
+        out = std::format_to(
+            out, "  store.guest.merge.{} i32 %v{}, %v{}",
+            current.op == opcode::store32_left ? "left" : "right",
+            current.data.inputs.right.index, current.data.inputs.left.index);
         break;
       case opcode::store16:
       case opcode::store8:

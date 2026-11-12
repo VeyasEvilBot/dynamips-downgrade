@@ -239,7 +239,8 @@ struct error {
                     ((word.bits & 63) == 0x21 || (word.bits & 63) == 0x23)) ||
                    op == 0x21 || op == 0x25 || op == 0x29 || op == 0x09 ||
                    op == 0x20 || op == 0x24 || op == 0x23 || op == 0x28 ||
-                   op == 0x2b || op == 0x37 || op == 0x3f;
+                   op == 0x2b || op == 0x2a || op == 0x2e || op == 0x37 ||
+                   op == 0x3f;
           })) +
       2 * static_cast<std::size_t>(
               std::ranges::count_if(words, [](instruction_word word) {
@@ -320,8 +321,9 @@ struct error {
     const bool load = merge_load || opcode == 0x21 || opcode == 0x25 ||
                       opcode == 0x20 || opcode == 0x24 || opcode == 0x23 ||
                       opcode == 0x37;
-    const bool store =
-        opcode == 0x29 || opcode == 0x28 || opcode == 0x2b || opcode == 0x3f;
+    const bool merge_store = opcode == 0x2a || opcode == 0x2e;
+    const bool store = merge_store || opcode == 0x29 || opcode == 0x28 ||
+                       opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
     const bool branch = is_branch(words[i]);
     const bool jump = opcode == 2 || opcode == 3;
@@ -691,7 +693,9 @@ struct error {
         if (!value)
           return failed(value.error());
         if (let written = result.append(
-                opcode == 0x29 ? ir::node::store16(*address, *value, source)
+                merge_store ? ir::node::store_merge32(*address, *value,
+                                                      opcode == 0x2e, source)
+                : opcode == 0x29 ? ir::node::store16(*address, *value, source)
                 : opcode == 0x28
                     ? ir::node::store8(*address, *value, source)
                     : ir::node::store(*address, *value, source, size));

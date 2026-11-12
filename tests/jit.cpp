@@ -1612,6 +1612,110 @@ template <bool Word> fn merged_loads() -> void {
       "word/doubleword merge loads pair joins bytes across a page boundary");
 }
 
+fn merged_word_stores() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create merged-store compiler");
+  std::array<std::byte, 2 * mem::page_size> ram;
+  let memory = mem::address_space::create(ram, 3);
+  require(
+      memory &&
+          (*memory)->map_ram({0x1000}, {0}, mem::permission::write).has_value(),
+      "map merged-store RAM");
+  unsigned callbacks = 0;
+  mem::device endpoint{
+      &callbacks,
+      [](void *context, mem::device_access) noexcept
+          -> std::expected<std::uint64_t, mem::device_error> {
+        (*static_cast<unsigned *>(context))++;
+        return 0;
+      },
+      [](void *context, mem::device_access,
+         std::uint64_t) noexcept -> std::expected<void, mem::device_error> {
+        (*static_cast<unsigned *>(context))++;
+        return {};
+      }};
+  require(
+      (*memory)
+          ->map_device({0x4000}, {0x100000}, endpoint, mem::permission::write)
+          .has_value(),
+      "map partial-store device");
+  constexpr std::array source{std::byte{0x89}, std::byte{0xab}, std::byte{0xcd},
+                              std::byte{0xef}};
+  for (const bool right : {false, true}) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{
+        mips::instruction_word{right ? 0xb8220000u : 0xa8220000u}};
+    let block = mips::translate(words, {0x8000}, arena);
+    require(block.has_value(), "translate SWL/SWR");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile SWL/SWR");
+    for (unsigned offset = 0; offset < 4; offset++) {
+      ram.fill(std::byte{0xaa});
+      std::array<std::byte, 8> expected;
+      expected.fill(std::byte{0xaa});
+      if (right)
+        for (unsigned i = 0; i <= offset; i++)
+          expected[i] = source[3 - offset + i];
+      else
+        for (unsigned i = offset; i < 4; i++)
+          expected[i] = source[i - offset];
+      std::array<std::uint64_t, 32> registers{};
+      registers[1] = 0x1000 + offset;
+      registers[2] = 0x1234567889abcdefULL;
+      require(native->run(registers, **memory).has_value() &&
+                  std::ranges::equal(expected, std::span{ram}.first(8)),
+              "SWL/SWR write only selected bytes at every offset without read "
+              "permission");
+    }
+    std::array<std::uint64_t, 32> registers{};
+    registers[1] = 0x3003;
+    registers[2] = 0x89abcdef;
+    const let before = ram;
+    const let absent = native->run(registers, **memory);
+    require(!absent && absent.error().pc == 0x8000 &&
+                absent.error().access.address.value == 0x3003 && ram == before,
+            "unmapped partial store retains its original address and has no "
+            "effect");
+    registers[1] = 0x4001;
+    const let device = native->run(registers, **memory);
+    require(!device &&
+                device.error().access.reason ==
+                    mem::fault_reason::unsupported_size &&
+                callbacks == 0,
+            "partial MMIO stores fail without any device read or write");
+  }
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  const std::array pair{mips::instruction_word{0xa8220000},
+                        mips::instruction_word{0xb8220003}};
+  let block = mips::translate(pair, {0x8000}, arena);
+  require(block.has_value(), "translate paired partial stores");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile paired partial stores");
+  ram.fill(std::byte{0xaa});
+  std::array<std::uint64_t, 32> registers{};
+  registers[1] = 0x1ffd;
+  registers[2] = 0x89abcdef;
+  const let fault = native->run(registers, **memory);
+  require(!fault && fault.error().pc == 0x8004 &&
+              ram[mem::page_size - 3] == source[0] &&
+              ram[mem::page_size - 1] == source[2] &&
+              ram[mem::page_size] == std::byte{0xaa},
+          "faulting second partial store preserves the first store only");
+  require((*memory)
+              ->map_ram({0x2000}, {mem::page_size}, mem::permission::write)
+              .has_value(),
+          "map second partial-store page");
+  require(native->run(registers, **memory).has_value() &&
+              std::ranges::equal(source,
+                                 std::span{ram}.subspan(mem::page_size - 3, 4)),
+          "SWL/SWR pair stores an unaligned word across pages");
+}
+
 fn indexed_cache_maintenance() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -2566,6 +2670,7 @@ fn main(int argc, char **argv) -> int {
   cop1_transfers();
   merged_loads<false>();
   merged_loads<true>();
+  merged_word_stores();
   indexed_cache_maintenance();
   hilo_arithmetic();
   hilo_transfers();
