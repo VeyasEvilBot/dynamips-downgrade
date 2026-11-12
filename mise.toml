@@ -21,7 +21,12 @@ description = "build and run the standalone MIPS-to-native playground"
 run = 'xmake build -y jit-playground && xmake run jit-playground "$@"'
 
 [tasks."run:c7200"]
-description = "run the C7200 boot probe"
+description = "build and run C7200 with an isolated release profile"
+quiet = true
+run = 'cd tools/boot-release && xmake f -P . -q -m release --system_packages=y -y && xmake build -P . -q -y c7200-boot && xmake run -P . -q c7200-boot "$@"'
+
+[tasks."run:c7200:dev"]
+description = "run C7200 with the current development build configuration"
 quiet = true
 run = 'xmake build -q -y c7200-boot && xmake run -q c7200-boot "$@"'
 
