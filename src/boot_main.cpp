@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <new>
+#include <limits>
 #include <span>
 #include <charconv>
 #include <cstdint>
@@ -93,8 +94,9 @@ fn flush_output(dynamips::devices::rom_services &device)
   return {};
 }
 
-fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
-         bool dump_ir, bool stop_at_handoff) -> int {
+fn run(const char *rom_path, const char *ios_path,
+         std::optional<std::uint64_t> budget, bool dump_ir,
+         bool stop_at_handoff) -> int {
   let rom = load(rom_path);
   if (!rom)
     return 1;
@@ -136,7 +138,9 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
   const let &model = (*board)->model();
   std::uint64_t executed = 0;
   for (;;) {
-    const let result = (*board)->run_slice(budget - executed, 64, dump_ir);
+    const let result = (*board)->run_slice(
+        budget ? *budget - executed : std::numeric_limits<std::uint64_t>::max(),
+        64, dump_ir);
     if (const let flushed = flush_output(services); !flushed) {
       std::println(stderr, "boot: console output failed: {}",
                    flushed.error().message());
@@ -176,7 +180,8 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
       }
       return 2;
     }
-    executed += result->instructions;
+    if (budget)
+      executed += result->instructions;
     if (result->reason == jit::stop_reason::yielded)
       continue;
     if (result->reason == jit::stop_reason::handoff ||
@@ -195,7 +200,7 @@ fn main(int argc, char **argv) -> int {
   try {
     const char *rom = "stable/mips64_microcode";
     const char *ios = nullptr;
-    std::uint64_t budget = 4096;
+    std::optional<std::uint64_t> budget;
     bool dump_ir = false;
     bool stop_at_handoff = false;
     for (int i = 1; i < argc; i++) {
@@ -205,7 +210,9 @@ fn main(int argc, char **argv) -> int {
             "Usage: c7200-boot [--rom ELF] [--ios ELF_OR_ZIP] [--budget N] "
             "[--dump-ir] [--stop-at-handoff]\n"
             "Boot the C7200 ROM and IOS image.\n"
-            "Default ROM: stable/mips64_microcode. Exit 2 means boot is "
+            "Default ROM: stable/mips64_microcode. No instruction limit unless "
+            "--budget is set.\n"
+            "Exit 2 means boot is "
             "blocked or the instruction budget is exhausted.");
         return 0;
       }
@@ -231,13 +238,15 @@ fn main(int argc, char **argv) -> int {
         ios = argv[i];
       else {
         const std::string_view text{argv[i]};
+        std::uint64_t limit = 0;
         const let parsed =
-            std::from_chars(text.data(), text.data() + text.size(), budget);
+            std::from_chars(text.data(), text.data() + text.size(), limit);
         if (text.empty() || parsed.ec != std::errc{} ||
             parsed.ptr != text.data() + text.size()) {
           std::println(stderr, "boot: invalid instruction budget: {}", text);
           return 1;
         }
+        budget = limit;
       }
     }
     return run(rom, ios, budget, dump_ir, stop_at_handoff);
