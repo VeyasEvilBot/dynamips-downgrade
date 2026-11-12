@@ -46,6 +46,7 @@ enum class opcode : std::uint8_t {
   read_hilo,
   write_hilo,
   multiply32,
+  multiply_unsigned32,
   divide_unsigned32,
   read_state,
   shift_right_arithmetic32,
@@ -89,13 +90,13 @@ enum class opcode : std::uint8_t {
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
   return op != opcode::tlb_operation && op != opcode::memory_barrier &&
-         op != opcode::cache_index && op != opcode::multiply32 &&
-         op != opcode::divide_unsigned32 && op != opcode::exception_return &&
-         op != opcode::write_hilo && op != opcode::syscall &&
-         op != opcode::write_cop1_64 && op != opcode::write_cop0_64 &&
-         op != opcode::write_cop0 && op != opcode::write_state &&
-         op != opcode::store16 && op != opcode::store8 &&
-         op != opcode::store32 && op != opcode::store64;
+         op != opcode::cache_index && op != opcode::multiply_unsigned32 &&
+         op != opcode::multiply32 && op != opcode::divide_unsigned32 &&
+         op != opcode::exception_return && op != opcode::write_hilo &&
+         op != opcode::syscall && op != opcode::write_cop1_64 &&
+         op != opcode::write_cop0_64 && op != opcode::write_cop0 &&
+         op != opcode::write_state && op != opcode::store16 &&
+         op != opcode::store8 && op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t {
@@ -184,6 +185,16 @@ struct node {
             source,
             {},
             opcode::multiply32,
+            width::bits64};
+  }
+
+  static constexpr fn multiply_unsigned32(value_id left, value_id right,
+                                           std::uint32_t source) noexcept
+      -> node {
+    return {{.inputs = {left, right}},
+            source,
+            {},
+            opcode::multiply_unsigned32,
             width::bits64};
   }
 
@@ -793,6 +804,7 @@ private:
     case opcode::shift_left32_variable:
     case opcode::shift_right32_variable:
     case opcode::shift_right_arithmetic32_variable:
+    case opcode::multiply_unsigned32:
     case opcode::multiply32:
     case opcode::divide_unsigned32:
     case opcode::add_checked32:
@@ -990,11 +1002,14 @@ private:
                                                            : "ashr.i32.sext",
             current.data.inputs.left.index, current.data.inputs.right.index);
         break;
+      case opcode::multiply_unsigned32:
       case opcode::multiply32:
       case opcode::divide_unsigned32:
         out = std::format_to(
             out, "  hilo.{} %v{}, %v{}",
-            current.op == opcode::multiply32 ? "mul.s32" : "div.u32",
+            current.op == opcode::multiply32            ? "mul.s32"
+            : current.op == opcode::multiply_unsigned32 ? "mul.u32"
+                                                        : "div.u32",
             current.data.inputs.left.index, current.data.inputs.right.index);
         break;
       case opcode::add_checked32:

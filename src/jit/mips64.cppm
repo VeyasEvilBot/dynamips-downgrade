@@ -106,6 +106,14 @@ struct hilo_state {
                 static_cast<std::uint32_t>(bits));
   }
 
+  fn multiply_unsigned32(std::uint64_t left, std::uint64_t right) noexcept
+      -> void {
+    const let product = std::uint64_t{static_cast<std::uint32_t>(left)} *
+                        static_cast<std::uint32_t>(right);
+    write_words(static_cast<std::uint32_t>(product >> 32),
+                static_cast<std::uint32_t>(product));
+  }
+
   fn divide_unsigned32(std::uint64_t left, std::uint64_t right) noexcept
       -> void {
     const let numerator = static_cast<std::uint32_t>(left);
@@ -234,7 +242,8 @@ struct error {
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
     const let function = bits & 63;
     const bool hilo_arithmetic =
-        opcode == 0 && (function == 0x18 || function == 0x1b);
+        opcode == 0 &&
+        (function == 0x18 || function == 0x19 || function == 0x1b);
     const bool hilo_read =
         opcode == 0 && (function == 0x10 || function == 0x12);
     const bool hilo_write =
@@ -427,8 +436,9 @@ struct error {
       if (!left || !right)
         return failed(!left ? left.error() : right.error());
       if (let written = result.append(
-              function == 0x18
-                  ? ir::node::multiply32(*left, *right, source)
+              function == 0x18 ? ir::node::multiply32(*left, *right, source)
+              : function == 0x19
+                  ? ir::node::multiply_unsigned32(*left, *right, source)
                   : ir::node::divide_unsigned32(*left, *right, source));
           !written)
         return failed(written.error());

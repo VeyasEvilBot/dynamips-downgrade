@@ -265,6 +265,11 @@ private:
     context->hilo->multiply32(left, right);
   }
 
+  static fn multiply_unsigned32(execution_context *context, std::uint64_t left,
+                                 std::uint64_t right) noexcept -> void {
+    context->hilo->multiply_unsigned32(left, right);
+  }
+
   static fn divide_unsigned32(execution_context *context, std::uint64_t left,
                                std::uint64_t right) noexcept -> void {
     context->hilo->divide_unsigned32(left, right);
@@ -639,7 +644,8 @@ public:
             return failure(emitted, i);
           continue;
         }
-        if (node.op == ir::opcode::multiply32 ||
+        if (node.op == ir::opcode::multiply_unsigned32 ||
+            node.op == ir::opcode::multiply32 ||
             node.op == ir::opcode::divide_unsigned32) {
           uses_hilo = true;
           const let left = operand(node.data.inputs.left);
@@ -648,6 +654,8 @@ public:
             return failure(!left ? left.error() : right.error(), i);
           const let target = node.op == ir::opcode::multiply32
                                  ? &compiled_block::multiply32
+                             : node.op == ir::opcode::multiply_unsigned32
+                                 ? &compiled_block::multiply_unsigned32
                                  : &compiled_block::divide_unsigned32;
           asmjit::InvokeNode *call = nullptr;
           if (const let status =
@@ -996,6 +1004,7 @@ public:
           }
           break;
         }
+        case ir::opcode::multiply_unsigned32:
         case ir::opcode::multiply32:
         case ir::opcode::divide_unsigned32:
         case ir::opcode::read_hilo:
