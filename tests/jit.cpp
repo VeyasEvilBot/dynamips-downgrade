@@ -1612,8 +1612,9 @@ template <bool Word> fn merged_loads() -> void {
       "word/doubleword merge loads pair joins bytes across a page boundary");
 }
 
-fn merged_word_stores() -> void {
+template <bool Doubleword> fn merged_stores() -> void {
   namespace mem = jit::memory;
+  constexpr unsigned size = Doubleword ? 8 : 4;
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create merged-store compiler");
   std::array<std::byte, 2 * mem::page_size> ram;
@@ -1640,39 +1641,43 @@ fn merged_word_stores() -> void {
           ->map_device({0x4000}, {0x100000}, endpoint, mem::permission::write)
           .has_value(),
       "map partial-store device");
-  constexpr std::array source{std::byte{0x89}, std::byte{0xab}, std::byte{0xcd},
-                              std::byte{0xef}};
+  constexpr std::array source_bytes{
+      std::byte{0x12}, std::byte{0x34}, std::byte{0x56}, std::byte{0x78},
+      std::byte{0x89}, std::byte{0xab}, std::byte{0xcd}, std::byte{0xef}};
+  const let source = std::span{source_bytes}.last(size);
   for (const bool right : {false, true}) {
     alignas(std::max_align_t) std::array<std::byte, 8192> storage;
     std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                               std::pmr::null_memory_resource()};
-    const std::array words{
-        mips::instruction_word{right ? 0xb8220000u : 0xa8220000u}};
+    const std::array words{mips::instruction_word{
+        Doubleword ? (right ? 0xb4220000u : 0xb0220000u)
+                   : (right ? 0xb8220000u : 0xa8220000u)}};
     let block = mips::translate(words, {0x8000}, arena);
-    require(block.has_value(), "translate SWL/SWR");
+    require(block.has_value(), "translate word/doubleword merge stores");
     let native = compiler->compile(*block, arena);
-    require(native.has_value(), "compile SWL/SWR");
-    for (unsigned offset = 0; offset < 4; offset++) {
+    require(native.has_value(), "compile word/doubleword merge stores");
+    for (unsigned offset = 0; offset < size; offset++) {
       ram.fill(std::byte{0xaa});
-      std::array<std::byte, 8> expected;
+      std::array<std::byte, 16> expected;
       expected.fill(std::byte{0xaa});
       if (right)
         for (unsigned i = 0; i <= offset; i++)
-          expected[i] = source[3 - offset + i];
+          expected[i] = source[size - 1 - offset + i];
       else
-        for (unsigned i = offset; i < 4; i++)
+        for (unsigned i = offset; i < size; i++)
           expected[i] = source[i - offset];
       std::array<std::uint64_t, 32> registers{};
       registers[1] = 0x1000 + offset;
       registers[2] = 0x1234567889abcdefULL;
       require(native->run(registers, **memory).has_value() &&
-                  std::ranges::equal(expected, std::span{ram}.first(8)),
-              "SWL/SWR write only selected bytes at every offset without read "
+                  std::ranges::equal(expected, std::span{ram}.first(16)),
+              "word/doubleword merge stores write only selected bytes at every "
+              "offset without read "
               "permission");
     }
     std::array<std::uint64_t, 32> registers{};
     registers[1] = 0x3003;
-    registers[2] = 0x89abcdef;
+    registers[2] = 0x1234567889abcdefULL;
     const let before = ram;
     const let absent = native->run(registers, **memory);
     require(!absent && absent.error().pc == 0x8000 &&
@@ -1690,8 +1695,9 @@ fn merged_word_stores() -> void {
   alignas(std::max_align_t) std::array<std::byte, 16384> storage;
   std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                             std::pmr::null_memory_resource()};
-  const std::array pair{mips::instruction_word{0xa8220000},
-                        mips::instruction_word{0xb8220003}};
+  const std::array pair{
+      mips::instruction_word{Doubleword ? 0xb0220000u : 0xa8220000u},
+      mips::instruction_word{Doubleword ? 0xb4220007u : 0xb8220003u}};
   let block = mips::translate(pair, {0x8000}, arena);
   require(block.has_value(), "translate paired partial stores");
   let native = compiler->compile(*block, arena);
@@ -1699,7 +1705,7 @@ fn merged_word_stores() -> void {
   ram.fill(std::byte{0xaa});
   std::array<std::uint64_t, 32> registers{};
   registers[1] = 0x1ffd;
-  registers[2] = 0x89abcdef;
+  registers[2] = 0x1234567889abcdefULL;
   const let fault = native->run(registers, **memory);
   require(!fault && fault.error().pc == 0x8004 &&
               ram[mem::page_size - 3] == source[0] &&
@@ -1711,9 +1717,10 @@ fn merged_word_stores() -> void {
               .has_value(),
           "map second partial-store page");
   require(native->run(registers, **memory).has_value() &&
-              std::ranges::equal(source,
-                                 std::span{ram}.subspan(mem::page_size - 3, 4)),
-          "SWL/SWR pair stores an unaligned word across pages");
+              std::ranges::equal(
+                  source, std::span{ram}.subspan(mem::page_size - 3, size)),
+          "word/doubleword merge stores pair stores an unaligned word across "
+          "pages");
 }
 
 fn indexed_cache_maintenance() -> void {
@@ -2670,7 +2677,8 @@ fn main(int argc, char **argv) -> int {
   cop1_transfers();
   merged_loads<false>();
   merged_loads<true>();
-  merged_word_stores();
+  merged_stores<false>();
+  merged_stores<true>();
   indexed_cache_maintenance();
   hilo_arithmetic();
   hilo_transfers();
