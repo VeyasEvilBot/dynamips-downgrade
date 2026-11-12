@@ -746,7 +746,7 @@ fn cop0_writes() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create CP0 compiler");
-  for (const unsigned slot : {9u, 11u, 12u, 13u, 15u, 16u}) {
+  for (const unsigned slot : {7u, 9u, 11u, 12u, 13u, 15u, 16u}) {
     alignas(std::max_align_t) std::array<std::byte, 8192> storage;
     std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                               std::pmr::null_memory_resource()};
@@ -767,10 +767,11 @@ fn cop0_writes() -> void {
     const let absent = native->run(state, **memory);
     require(!absent && absent.error().code == amd64::error_code::cop0_required,
             "CP0 instructions reject missing state");
-    require(native->run(state, **memory, &cop0).has_value() &&
-                cop0.registers[slot] ==
-                    (slot == 15 || slot == 16 ? 0x1234u : 0x87654321u),
-            "MTC0 stores low 32 bits and preserves read-only registers");
+    require(
+        native->run(state, **memory, &cop0).has_value() &&
+            cop0.registers[slot] ==
+                (slot == 7 || slot == 15 || slot == 16 ? 0x1234u : 0x87654321u),
+        "MTC0 stores low 32 bits and preserves read-only registers");
     require(state[2] == static_cast<std::uint64_t>(std::int64_t{
                             static_cast<std::int32_t>(cop0.registers[slot])}),
             "MFC0 sign extends the low word into a guest register");
@@ -784,7 +785,7 @@ fn cop0_full_width() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create full-width CP0 compiler");
-  for (const unsigned slot : {8u, 9u, 11u, 12u, 13u, 14u, 15u, 16u, 30u}) {
+  for (const unsigned slot : {7u, 8u, 9u, 11u, 12u, 13u, 14u, 15u, 16u, 30u}) {
     alignas(std::max_align_t) std::array<std::byte, 16384> storage;
     std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
                                               std::pmr::null_memory_resource()};
@@ -811,7 +812,7 @@ fn cop0_full_width() -> void {
     require(state[0] == 0 && state[2] == 0xfedcba9881234567ULL &&
                 state[3] == 0xffffffff81234567ULL,
             "DMFC0 preserves all bits while MFC0 sign extends the low word");
-    const let expected = slot == 8 || slot == 15 || slot == 16
+    const let expected = slot == 7 || slot == 8 || slot == 15 || slot == 16
                              ? 0xfedcba9881234567ULL
                          : slot == 14 || slot == 30 ? state[1]
                                                     : 0x87654321ULL;

@@ -75,7 +75,7 @@ struct cop0_state {
   }
 
   fn write(std::uint16_t slot, std::uint32_t value) noexcept -> void {
-    if (slot == 8 || slot == 15 || slot == 16)
+    if (slot == 7 || slot == 8 || slot == 15 || slot == 16)
       return;
     registers[slot] = value;
     if (slot == 11)
@@ -281,7 +281,7 @@ struct error {
     if ((mtc0 || mfc0) &&
         ((bits & 0x7ff) != 0 ||
          (rd != 9 && rd != 11 && rd != 12 && rd != 13 && rd != 15 && rd != 16 &&
-          rd != 8 && rd != 14 && rd != 30)))
+          rd != 7 && rd != 8 && rd != 14 && rd != 30)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (indirect && (rt != 0 || (function == 8 && rd != 0) ||
                      (function == 9 && rd == rs) || ((bits >> 6) & 31) != 0))

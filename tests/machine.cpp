@@ -611,6 +611,9 @@ fn real_rom(const char *path) -> bool {
                                 attachments, machine::boot_mode::handoff);
   if (!check(board.has_value(), "prepare full-size C7200 NPE-400 memory map"))
     return false;
+  if (!check((*board)->cpu().cop0.registers[7] == 0x20000000,
+             "NPE-400 reset exposes the RM7000 64-entry TLB feature"))
+    return false;
   const let first =
       (*board)->memory().fetch<std::uint32_t>({0xffffffffbfc00000ULL});
   std::array<std::array<char, 512>, 2> output{};

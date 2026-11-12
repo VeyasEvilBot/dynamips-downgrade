@@ -41,6 +41,7 @@ struct cpu_definition {
   std::uint32_t processor_id;
   jit::mips64::guest_address reset;
   jit::mips64::guest_address boot_stack{};
+  std::uint32_t info = 0;
 };
 
 struct device_window {
@@ -261,6 +262,7 @@ public:
     state_ = {};
     state_.pc = model_.cpu.reset;
     state_.registers[29] = model_.cpu.boot_stack.value;
+    state_.cop0.registers[7] = model_.cpu.info;
     state_.cop0.registers[12] = 0x00400000;
     state_.cop0.registers[15] = model_.cpu.processor_id;
     state_.cop0.registers[16] = 0x00c08ff0;

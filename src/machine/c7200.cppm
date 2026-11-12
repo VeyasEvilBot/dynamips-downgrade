@@ -26,7 +26,11 @@ export inline constexpr std::uint16_t configuration_register = 0x2102;
 
 export inline constexpr machine::definition npe400{
     "c7200-npe400",
-    {"R7000", 0x00002721, {0xffffffffbfc00000ULL}, {0xffffffff80004000ULL}},
+    {"R7000",
+     0x00002721,
+     {0xffffffffbfc00000ULL},
+     {0xffffffff80004000ULL},
+     0x20000000},
     256 * 1024 * 1024,
     {{0x1fc00000}, 4 * 1024 * 1024},
     windows};

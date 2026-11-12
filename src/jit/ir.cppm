@@ -684,8 +684,8 @@ private:
       if (current.slot.index != 9 && current.slot.index != 11 &&
           current.slot.index != 12 && current.slot.index != 13 &&
           current.slot.index != 15 && current.slot.index != 16 &&
-          current.slot.index != 8 && current.slot.index != 14 &&
-          current.slot.index != 30)
+          current.slot.index != 7 && current.slot.index != 8 &&
+          current.slot.index != 14 && current.slot.index != 30)
         return fail(error_code::invalid_slot);
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
