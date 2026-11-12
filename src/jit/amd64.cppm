@@ -188,6 +188,15 @@ private:
     }
   }
 
+  static fn cache_index(execution_context *context,
+                         std::uint64_t address) noexcept -> void {
+    const let result = context->memory->cache_index({address});
+    if (!result) {
+      context->fault = result.error();
+      context->failed = true;
+    }
+  }
+
   static fn multiply32(execution_context *context, std::uint64_t left,
                         std::uint64_t right) noexcept -> void {
     context->hilo->multiply32(left, right);
@@ -375,6 +384,31 @@ public:
                    std::numeric_limits<std::uint64_t>::max() - positive_limit;
       };
 
+      const let check_memory = [&](const ir::node &node) -> asmjit::Error {
+        const let success = output.newLabel();
+        if (errors.code)
+          return errors.code;
+        if (const let emitted = output.cmp(
+                asmjit::x86::Mem{
+                    context,
+                    offsetof(compiled_block::execution_context, failed), 1},
+                0))
+          return emitted;
+        if (const let emitted = output.je(success))
+          return emitted;
+        const let fault_pc = output.newUInt64();
+        if (errors.code)
+          return errors.code;
+        if (const let emitted =
+                output.mov(fault_pc, asmjit::Imm{block.source_pc(node)}))
+          return emitted;
+        if (const let emitted = output.ret(fault_pc))
+          return emitted;
+        if (const let emitted = output.bind(success))
+          return emitted;
+        return asmjit::kErrorOk;
+      };
+
       const let annulled = output.newLabel();
       if (errors.code)
         return failure(errors.code, block.nodes().size());
@@ -402,10 +436,24 @@ public:
           values[i] = *input;
           continue;
         }
-        // RAM is coherent and dispatch validates executable bytes before reuse.
-        // Indexed I/D maintenance has no deferred cache state to publish.
-        if (node.op == ir::opcode::cache_index)
+        if (node.op == ir::opcode::cache_index) {
+          uses_memory = true;
+          const let address = operand(node.data.inputs.left);
+          if (!address)
+            return failure(address.error(), i);
+          asmjit::InvokeNode *call = nullptr;
+          if (const let status = output.invoke(
+                  &call, asmjit::Imm{&compiled_block::cache_index},
+                  asmjit::FuncSignature::build<
+                      void, compiled_block::execution_context *,
+                      std::uint64_t>()))
+            return failure(status, i);
+          call->setArg(0, context);
+          call->setArg(1, *address);
+          if (const let emitted = check_memory(node))
+            return failure(emitted, i);
           continue;
+        }
         if (node.op == ir::opcode::constant)
           continue;
         if (node.op == ir::opcode::load16_signed ||
@@ -468,26 +516,7 @@ public:
           }
           call->setArg(0, context);
           call->setArg(1, *address);
-          const let success = output.newLabel();
-          if (errors.code)
-            return failure(errors.code, i);
-          if (const let emitted = output.cmp(
-                  asmjit::x86::Mem{
-                      context,
-                      offsetof(compiled_block::execution_context, failed), 1},
-                  0))
-            return failure(emitted, i);
-          if (const let emitted = output.je(success))
-            return failure(emitted, i);
-          const let fault_pc = output.newUInt64();
-          if (errors.code)
-            return failure(errors.code, i);
-          if (const let emitted =
-                  output.mov(fault_pc, asmjit::Imm{block.source_pc(node)}))
-            return failure(emitted, i);
-          if (const let emitted = output.ret(fault_pc))
-            return failure(emitted, i);
-          if (const let emitted = output.bind(success))
+          if (const let emitted = check_memory(node))
             return failure(emitted, i);
           continue;
         }

@@ -284,6 +284,20 @@ public:
     return read<T, Order, access_kind::execute>(address);
   }
 
+  [[nodiscard]] fn cache_index(virtual_address address) noexcept
+      -> std::expected<void, fault> {
+    // Direct kernel indices select cache lines even beyond installed RAM.
+    if (address.value >= 0xffffffff80000000ULL &&
+        address.value < 0xffffffffc0000000ULL)
+      return {};
+    if (lookup<access_kind::read>(address))
+      return {};
+    const let mapped = resolve(address, access_kind::read, access_size::byte);
+    if (!mapped)
+      return std::unexpected(mapped.error());
+    return {};
+  }
+
   // Borrowed executable RAM/ROM, ending at the current page boundary.
   // Mappings and permissions must be rechecked after mapping_generation
   // changes.

@@ -131,11 +131,11 @@ struct node {
     return {{.inputs = {input, {}}}, source, {}, opcode::alias, type};
   }
 
-  static constexpr fn cache_index(std::uint32_t operation,
+  static constexpr fn cache_index(std::uint32_t operation, value_id address,
                                    std::uint32_t source) noexcept -> node {
-    return {{.immediate = operation},
+    return {{.inputs = {address, {}}},
             source,
-            {},
+            {static_cast<std::uint16_t>(operation)},
             opcode::cache_index,
             width::bits64};
   }
@@ -646,7 +646,7 @@ private:
     case opcode::cache_index:
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
-      if (current.data.immediate > 1)
+      if (current.slot.index > 1 || !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
     case opcode::exception_return:
@@ -780,10 +780,10 @@ private:
                              current.data.inputs.left.index);
         break;
       case opcode::cache_index:
-        out = std::format_to(out, "  cache.index.{}",
-                             current.data.immediate == 0
-                                 ? "invalidate.i"
-                                 : "writeback.invalidate.d");
+        out = std::format_to(out, "  cache.index.{} %v{}",
+                             current.slot.index == 0 ? "invalidate.i"
+                                                     : "writeback.invalidate.d",
+                             current.data.inputs.left.index);
         break;
       case opcode::exception_return:
         out = std::format_to(out, "  return.exception");

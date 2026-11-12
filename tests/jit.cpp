@@ -1228,6 +1228,7 @@ fn algebraic_register_identities() -> void {
 }
 
 fn indexed_cache_maintenance() -> void {
+  namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create cache maintenance compiler");
   for (const std::uint32_t operation : {0u, 1u}) {
@@ -1245,12 +1246,46 @@ fn indexed_cache_maintenance() -> void {
     let native = compiler->compile(*block, arena);
     require(native.has_value(), "compile indexed cache maintenance");
     std::array<std::uint64_t, 32> state{};
-    state[1] = UINT64_MAX;
-    const let result = native->run(state);
+    std::array<std::byte, mem::page_size> ram{};
+    let memory = mem::address_space::create(ram, 2);
+    require(memory.has_value(), "create cache address translation space");
+    state[1] = 0xffffffff80001000ULL;
+    const let result = native->run(state, **memory);
     require(result && *result == 0x1008 && state[2] == 7 &&
-                state[1] == UINT64_MAX,
+                state[1] == 0xffffffff80001000ULL,
             "indexed maintenance requires no mapped address and preserves "
             "registers");
+    state[1] = 0x4000;
+    const let invalid = native->run(state, **memory);
+    require(!invalid && invalid.error().pc == 0x1004 &&
+                invalid.error().access.address.value == 0x3fff &&
+                invalid.error().access.reason == mem::fault_reason::unmapped &&
+                state[2] == 7,
+            "mapped cache indices require translation and retain precise fault "
+            "state");
+    require(
+        (*memory)->map_ram({0x8000}, {0}, mem::permission::read).has_value(),
+        "map a valid cache index address");
+    state[1] = 0x8001;
+    require(native->run(state, **memory).has_value(),
+            "mapped cache indices translate without data access");
+    unsigned reads = 0;
+    mem::device endpoint{
+        &reads,
+        [](void *context, mem::device_access) noexcept
+            -> std::expected<std::uint64_t, mem::device_error> {
+          (*static_cast<unsigned *>(context))++;
+          return 0;
+        },
+        nullptr};
+    require(
+        (*memory)
+            ->map_device({0x9000}, {0x100000}, endpoint, mem::permission::read)
+            .has_value(),
+        "map cache index device translation");
+    state[1] = 0x9001;
+    require(native->run(state, **memory).has_value() && reads == 0,
+            "cache translation never performs MMIO register reads");
     const std::array unsupported{mips::instruction_word{0xbd100000}};
     require(!mips::translate(unsupported, {0x1000}, arena),
             "hit and tag cache operations require their own modeled semantics");
@@ -1584,6 +1619,7 @@ fn writable_code_dispatch() -> void {
   require((*memory)->store<std::uint32_t>({0x3020}, 0x3403000b).has_value(),
           "modify warmed code through an alias before cache maintenance");
   state.pc = {0x1040};
+  state.registers[9] = 0xffffffff80000000ULL;
   const let maintained = (*dispatch)->run_slice(state, 100);
   require(!maintained && maintained.error().pc == 0x1024 &&
               state.registers[3] == 11,

@@ -295,12 +295,6 @@ struct error {
                                        : error_code::invalid_ir,
                                    i});
     };
-    if (cache) {
-      if (let maintained = result.append(ir::node::cache_index(rt, source));
-          !maintained)
-        return failed(maintained.error());
-      continue;
-    }
     if (eret) {
       if (let returned = result.append(ir::node::exception_return(source));
           !returned)
@@ -354,6 +348,26 @@ struct error {
       }
       return registers[index];
     };
+    if (cache) {
+      const let base = read(rs);
+      if (!base)
+        return failed(base.error());
+      const let offset = result.append(
+          ir::node::constant(static_cast<std::uint64_t>(std::int64_t{
+                                 static_cast<std::int16_t>(bits & 0xffff)}),
+                             source));
+      if (!offset)
+        return failed(offset.error());
+      const let address = result.append(
+          ir::node::binary(ir::binary_kind::add_wrap, *base, *offset, source));
+      if (!address)
+        return failed(address.error());
+      if (let maintained =
+              result.append(ir::node::cache_index(rt, *address, source));
+          !maintained)
+        return failed(maintained.error());
+      continue;
+    }
     if (hilo_arithmetic) {
       const let left = read(rs);
       const let right = read(rt);
