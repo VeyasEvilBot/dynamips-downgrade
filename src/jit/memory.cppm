@@ -101,6 +101,17 @@ struct device {
   fn (*write)(void *, device_access, std::uint64_t) noexcept -> std::expected<void, device_error>;
 };
 
+// Borrowed backing covers the complete 4 KiB page containing physical.
+struct translated_page {
+  physical_address physical;
+  std::byte *host_page;
+  device *target;
+};
+
+using translation_callback = auto (*)(void *, virtual_address, access_kind,
+                                      access_size) noexcept
+    -> std::expected<translated_page, fault>;
+
 inline constexpr std::size_t page_size = 4096;
 
 struct cache_entry {
@@ -124,6 +135,14 @@ public:
 
   fn mapping_generation() const noexcept -> std::uint64_t {
     return generation_;
+  }
+
+  // The translation owner and returned backing outlive this address space.
+  fn set_translation(void *context, translation_callback callback) noexcept
+      -> void {
+    translation_context_ = context;
+    translate_ = callback;
+    invalidate();
   }
 
   // Immutable instruction images cannot have writable physical aliases.
@@ -400,6 +419,8 @@ private:
   std::uint64_t generation_ = 0;
   invalidation_batch *batch_ = nullptr;
   bool sealed_code_ = false;
+  void *translation_context_ = nullptr;
+  translation_callback translate_ = nullptr;
 
   explicit address_space(std::span<std::byte> ram) noexcept : ram_(ram) {}
 
@@ -510,9 +531,29 @@ private:
       -> std::expected<resolved_access, fault> {
     const virtual_address base{address.value & ~std::uint64_t{page_size - 1}};
     const let found = find(base);
-    if (found == mappings_.end() || found->address.value != base.value)
-      return std::unexpected(
-          fault{address, fault_reason::unmapped, access, size});
+    if (found == mappings_.end() || found->address.value != base.value) {
+      if (!translate_)
+        return std::unexpected(
+            fault{address, fault_reason::unmapped, access, size});
+      const let translated =
+          translate_(translation_context_, address, access, size);
+      if (!translated)
+        return std::unexpected(translated.error());
+      if (translated->target && access != access_kind::execute)
+        return resolved_access{nullptr, translated->target,
+                               translated->physical};
+      if (!translated->host_page || translated->target)
+        return std::unexpected(
+            fault{address, fault_reason::permission, access, size});
+      const cache_entry cached{base.value | 1, translated->host_page};
+      const let index = static_cast<std::size_t>(access);
+      first_[index][(base.value / page_size) & (first_level_entries - 1)] =
+          cached;
+      second_[index][second_index(base.value / page_size)] = cached;
+      return resolved_access{translated->host_page +
+                                 (address.value & (page_size - 1)),
+                             nullptr, translated->physical};
+    }
     if ((static_cast<unsigned>(found->permissions) &
          (1u << static_cast<unsigned>(access))) == 0)
       return std::unexpected(

@@ -181,6 +181,52 @@ fn rom_contract() -> bool {
       "ROM is executable but cannot gain write permission through an alias");
 }
 
+fn mapped_memory() -> bool {
+  fixture rom_file;
+  constexpr std::array words{0x3c016000u, // lui r1, 0x6000
+                             0x40815000u, // mtc0 r1, EntryHi
+                             0x34010006u, // ori r1, r0, V|D
+                             0x40811000u, // mtc0 r1, EntryLo0
+                             0x34010046u, // physical page 0x1000, V|D
+                             0x40811800u, // mtc0 r1, EntryLo1
+                             0x42000002u, // tlbwi
+                             0x3c026000u, 0x34031234u,
+                             0xac430000u, // sw r3, 0(r2)
+                             0x8c440000u, // lw r4, 0(r2)
+                             0x8c451000u, // lw r5, 0x1000(r2)
+                             0x1000ffffu, 0u};
+  if (!write_elf(rom_file, 0xbfc00000, words, 0xbfc00100))
+    return false;
+  let rom = firmware::image::read(rom_file.path);
+  if (!check(rom.has_value(), "load mapped-memory firmware"))
+    return false;
+  const machine::definition model{
+      "fixture-tlb",
+      {"R7000", 0x2721, {0xffffffffbfc00000ULL}, {}},
+      4 * mem::page_size,
+      {{0x1fc00000}, mem::page_size},
+      {}};
+  let board = machine::instance::create(model, *rom, nullptr, {},
+                                         machine::boot_mode::run);
+  if (!check(board.has_value(), "create mapped-memory machine"))
+    return false;
+  let &memory = (*board)->memory();
+  if (!check(
+          memory.store<std::uint32_t>({machine::cached_base + 0x1000}, 0x5678)
+              .has_value(),
+          "seed odd physical page"))
+    return false;
+  const let run = (*board)->run_slice(40);
+  if (!check(run && (*board)->cpu().registers[4] == 0x1234 &&
+                 (*board)->cpu().registers[5] == 0x5678 &&
+                 memory.load<std::uint32_t>({machine::cached_base}) == 0x1234,
+             "guest TLBWI routes paired mapped pages to physical RAM"))
+    return false;
+  (*board)->reset();
+  return check(!memory.load<std::uint32_t>({0x60000000}),
+               "reset discards cached TLB translations");
+}
+
 fn composition() -> bool {
   fixture rom_file, ios_file;
   constexpr std::array boot_words{0x34010007u, 0u};
@@ -709,6 +755,8 @@ fn real_rom(const char *path) -> bool {
 } // namespace
 
 fn main(int argc, char **argv) -> int {
+  if (!mapped_memory())
+    return 1;
   try {
     if (argc != 2)
       return 1;

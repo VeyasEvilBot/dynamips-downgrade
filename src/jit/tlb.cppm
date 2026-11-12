@@ -21,6 +21,8 @@ class table {
 public:
   static constexpr std::size_t capacity = 64;
 
+  fn empty() const noexcept -> bool { return occupied_ == 0; }
+
   [[nodiscard]] fn write(std::size_t index, entry value) noexcept
       -> std::expected<void, error> {
     if (index >= capacity)

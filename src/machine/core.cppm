@@ -26,6 +26,7 @@ import machine.firmware;
 import jit.memory;
 import jit.devices;
 import jit.mips64;
+import jit.tlb;
 import jit.dispatch;
 import jit.memory_dispatch;
 import jit.execution;
@@ -214,6 +215,7 @@ public:
           }
         }
       }
+      result->memory_->set_translation(result.get(), &instance::translate);
       if (mode == boot_mode::run) {
         let dispatch = jit::memory_dispatcher::create(*result->memory_);
         if (!dispatch)
@@ -259,6 +261,8 @@ public:
   // Warm reset preserves RAM and loaded firmware; the owner calls this while
   // stopped.
   fn reset() noexcept -> void {
+    if (!state_.cop0.translations.empty())
+      memory_->invalidate();
     state_ = {};
     state_.pc = model_.cpu.reset;
     state_.registers[29] = model_.cpu.boot_stack.value;
@@ -299,6 +303,45 @@ private:
   std::optional<std::uint64_t> ios_entry_;
 
   explicit instance(definition model) noexcept : model_(model) {}
+
+  static fn translate(void *context, mem::virtual_address address,
+                       mem::access_kind access, mem::access_size size) noexcept
+      -> std::expected<mem::translated_page, mem::fault> {
+    let &self = *static_cast<instance *>(context);
+    const let physical = self.state_.cop0.translations.translate(
+        address, static_cast<std::uint8_t>(self.state_.cop0.registers[10]),
+        access);
+    if (!physical)
+      return std::unexpected(
+          mem::fault{address,
+                     physical.error() == jit::tlb::error::modified
+                         ? mem::fault_reason::permission
+                         : mem::fault_reason::unmapped,
+                     access, size});
+    const let page = physical->value & ~std::uint64_t{mem::page_size - 1};
+    if (page < self.model_.ram_bytes)
+      return mem::translated_page{
+          *physical, reinterpret_cast<std::byte *>(self.ram_.get()) + page,
+          nullptr};
+    if (page >= self.model_.rom.base.value &&
+        page - self.model_.rom.base.value < self.model_.rom.size) {
+      if (access == mem::access_kind::write)
+        return std::unexpected(
+            mem::fault{address, mem::fault_reason::permission, access, size});
+      return mem::translated_page{
+          *physical,
+          reinterpret_cast<std::byte *>(self.rom_.get()) +
+              (page - self.model_.rom.base.value),
+          nullptr};
+    }
+    for (const let &window : self.model_.windows)
+      if (physical->value >= window.range.base.value &&
+          physical->value - window.range.base.value < window.range.size)
+        return mem::translated_page{*physical, nullptr,
+                                    &self.devices_.endpoint()};
+    return std::unexpected(
+        mem::fault{address, mem::fault_reason::bus, access, size});
+  }
 
   fn load(const firmware::image &image, bool ram_only) noexcept
       -> std::expected<void, setup_error> {

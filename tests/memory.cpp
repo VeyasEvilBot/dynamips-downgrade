@@ -152,7 +152,48 @@ fn fifo_io() -> void {
           "draining restores TX readiness");
 }
 
+fn translated_cache() -> void {
+  std::array<std::byte, mem::page_size> ram{};
+  let space = mem::address_space::create(ram, 0);
+  require(space.has_value(), "create translated address space");
+
+  struct state {
+    std::byte *page;
+    unsigned calls = 0;
+    bool writable = true;
+  } backing{ram.data()};
+
+  (*space)->set_translation(
+      &backing,
+      [](void *context, mem::virtual_address address, mem::access_kind access,
+         mem::access_size size) noexcept
+          -> std::expected<mem::translated_page, mem::fault> {
+        let &value = *static_cast<state *>(context);
+        value.calls++;
+        if (access == mem::access_kind::write && !value.writable)
+          return std::unexpected(
+              mem::fault{address, mem::fault_reason::permission, access, size});
+        return mem::translated_page{
+            {address.value & (mem::page_size - 1)}, value.page, nullptr};
+      });
+  require((*space)->store<std::uint32_t>({0x60000000}, 42).has_value() &&
+              (*space)->load<std::uint32_t>({0x60000000}) == 42 &&
+              backing.calls == 2,
+          "translation fills separate read and write caches");
+  require((*space)->load<std::uint32_t>({0x60000000}) == 42 &&
+              (*space)->store<std::uint32_t>({0x60000004}, 43).has_value() &&
+              backing.calls == 2,
+          "warm mapped accesses bypass translation callbacks");
+  backing.writable = false;
+  (*space)->invalidate();
+  const let denied = (*space)->store<std::uint32_t>({0x60000000}, 99);
+  require(!denied && denied.error().reason == mem::fault_reason::permission &&
+              (*space)->load<std::uint32_t>({0x60000000}) == 42,
+          "invalidation rechecks write permissions without modifying RAM");
+}
+
 fn main() -> int {
+  translated_cache();
   fifo_io();
   std::array<std::byte, 3 * mem::page_size> ram{};
   let created = mem::address_space::create(ram, 8);
