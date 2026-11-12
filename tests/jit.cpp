@@ -610,6 +610,28 @@ fn word_addition() -> void {
           "constant folding agrees with word shift and addition overflow");
 }
 
+fn immediate_xor() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create XORI compiler");
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{
+      mips::instruction_word{0x38228000}, mips::instruction_word{0x3403ffff},
+      mips::instruction_word{0x38638000}, mips::instruction_word{0x3820ffff}};
+  let block = mips::translate(words, {0x1000}, arena);
+  require(block && ir::optimize(*block, ir::fold_constants).has_value(),
+          "translate and fold XORI");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile XORI");
+  std::array<std::uint64_t, 32> state{};
+  state[1] = 0x1234567887654321ULL;
+  require(
+      native->run(state).has_value() && state[0] == 0 &&
+          state[2] == 0x123456788765c321ULL && state[3] == 0x7fff,
+      "XORI zero extends its immediate, preserves upper bits and respects r0");
+}
+
 fn cop0_writes() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -1640,6 +1662,7 @@ fn main(int argc, char **argv) -> int {
   word_shifts();
   word_addition();
   doubleword_shifts();
+  immediate_xor();
   cop0_writes();
   cop0_full_width();
   byte_stores();

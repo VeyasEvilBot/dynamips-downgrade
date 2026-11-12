@@ -192,8 +192,8 @@ struct error {
     const bool slti = opcode == 0x0a;
     const bool daddiu = opcode == 0x19;
     const bool addiu = opcode == 0x09;
-    const bool immediate = opcode == 0x0c || opcode == 0x0d || lui || addiu ||
-                           daddiu || slti || sltiu;
+    const bool immediate = opcode == 0x0c || opcode == 0x0d || opcode == 0x0e ||
+                           lui || addiu || daddiu || slti || sltiu;
     const bool load = opcode == 0x20 || opcode == 0x23 || opcode == 0x37;
     const bool store = opcode == 0x28 || opcode == 0x2b || opcode == 0x3f;
     const bool memory_access = load || store;
@@ -467,6 +467,7 @@ struct error {
       return failed(right.error());
     const let operation = sltiu               ? ir::binary_kind::unsigned_less
                           : slti              ? ir::binary_kind::signed_less
+                          : opcode == 0x0e    ? ir::binary_kind::bit_xor
                           : opcode == 0x0c    ? ir::binary_kind::bit_and
                           : (addiu || daddiu) ? ir::binary_kind::add_wrap
                           : immediate         ? ir::binary_kind::bit_or
