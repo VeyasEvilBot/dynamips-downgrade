@@ -21,8 +21,9 @@ description = "build and run the standalone MIPS-to-native playground"
 run = 'xmake build -y jit-playground && xmake run jit-playground "$@"'
 
 [tasks."run:c7200"]
-description = "prepare the C++ NPE-400 chassis and probe real ROM execution"
-run = 'xmake build -y c7200-boot && xmake run c7200-boot "$@"'
+description = "run the C7200 boot probe"
+quiet = true
+run = 'xmake build -q -y c7200-boot && xmake run -q c7200-boot "$@"'
 
 [tasks."test:jit"]
 description = "compare native JIT execution with MIPS register semantics"

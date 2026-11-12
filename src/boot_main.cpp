@@ -63,8 +63,10 @@ fn flush_output(dynamips::devices::rom_services &device)
     FILE *stream = channel == rom_output::console ? stdout : stderr;
     const let drained = device.drain(
         channel,
-        [stream](std::span<const std::byte> bytes) noexcept
+        [stream, channel](std::span<const std::byte> bytes) noexcept
             -> std::expected<std::size_t, std::error_code> {
+          if (channel == rom_output::log)
+            return bytes.size();
           try {
             std::print(
                 stream, "{}",
@@ -84,7 +86,8 @@ fn flush_output(dynamips::devices::rom_services &device)
         return std::unexpected(*cause);
       return std::unexpected(std::make_error_code(std::errc::protocol_error));
     }
-    if (std::fflush(stream) != 0)
+    if (channel == rom_output::console && *drained != 0 &&
+        std::fflush(stream) != 0)
       return std::unexpected(std::error_code{errno, std::generic_category()});
   }
   return {};
@@ -124,15 +127,6 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
     return 1;
   }
   const let &model = (*board)->model();
-  std::println("{}: CPU {}, configured PRID={:#x}", model.name, model.cpu.name,
-               model.cpu.processor_id);
-  std::println("RAM={} MiB; ROM={} MiB at {:#x}; reset PC={:#x}",
-               model.ram_bytes / (1024 * 1024), model.rom.size / (1024 * 1024),
-               model.rom.base.value, model.cpu.reset.value);
-  if ((*board)->ios_entry())
-    std::println("IOS loaded into RAM; entry={:#x}", *(*board)->ios_entry());
-  std::println(
-      "ROM boot probe; execution stops at the loaded IOS entry point.");
   std::uint64_t executed = 0;
   for (;;) {
     const let result = (*board)->run_slice(budget - executed, 64, dump_ir);
@@ -180,16 +174,14 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
     executed += result->instructions;
     if (result->reason == jit::stop_reason::yielded)
       continue;
-    if (result->reason == jit::stop_reason::handoff) {
-      std::println("ROM handed off to IOS at {:#x} after {} instructions; IOS "
-                   "execution has not started.",
-                   (*board)->cpu().pc.value, executed);
+    if (result->reason == jit::stop_reason::handoff ||
+        result->reason == jit::stop_reason::completed)
       return 0;
-    }
-    std::println("Probe executed {} instructions; PC={:#x}; stop={}", executed,
-                 (*board)->cpu().pc.value,
-                 static_cast<unsigned>(result->reason));
-    return result->reason == jit::stop_reason::completed ? 0 : 2;
+    std::println(
+        stderr,
+        "boot: instruction budget exhausted at PC {:#x}; increase --budget",
+        (*board)->cpu().pc.value);
+    return 2;
   }
 }
 } // namespace
