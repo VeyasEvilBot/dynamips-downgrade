@@ -274,6 +274,16 @@ fn serial_board_identity() -> bool {
 
 fn io_console() -> bool {
   dynamips::devices::c7200_iofpga io;
+  let &strobe = *io.descriptor().endpoint;
+  const mem::device_access startup{
+      {0x1e840398}, std::endian::big, mem::access_size::word};
+  if (!check(
+          strobe.write(strobe.context, startup, 0x02000000).has_value() &&
+              strobe.read(strobe.context, startup) == 0 &&
+              strobe.write(strobe.context, startup, 0).has_value(),
+          "I/O FPGA startup strobes are accepted and read zero as in legacy"))
+    return false;
+
   let &endpoint = *io.descriptor().endpoint;
   const let access = [](std::uint64_t offset) {
     return mem::device_access{

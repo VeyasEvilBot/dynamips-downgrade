@@ -90,6 +90,7 @@ private:
     case 0x224:
     case 0x234:
     case 0x244:
+    case 0x398:
     case 0x3a0:
       return 0;
     case 0x23c:
