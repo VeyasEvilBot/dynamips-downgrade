@@ -1481,7 +1481,14 @@ fn cp0_clock() -> void {
   state.pc = {0xffffffff80001000ULL};
   state.cop0.registers[11] = 1;
   state.cop0.registers[12] = 0x8001;
+  require((*memory)
+              ->load_linked<std::uint32_t>({0xffffffff80000080ULL})
+              .has_value(),
+          "reserve RAM before timer interrupt");
   const let interrupted = (*dispatch)->run_slice(state, 100, 100);
+  require((*memory)->store_conditional<std::uint32_t>({0xffffffff80000080ULL},
+                                                      1) == false,
+          "timer interrupt clears linked reservation");
   require(
       !interrupted && interrupted.error().pc == 0xffffffff80000184ULL &&
           state.registers[4] == 9 &&
@@ -1774,6 +1781,66 @@ fn cop1_memory_transfers() -> void {
       !absent && absent.error().pc == 0x8004 && cop1.registers[31] == 99 &&
           (*memory)->load<std::uint64_t>({0x1ff8}) == cop1.registers[0],
       "faulting COP1 load preserves its destination and the preceding store");
+}
+
+fn linked_word_operations() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(compiler && memory &&
+              (*memory)
+                  ->map_ram({0x1000}, {0},
+                            mem::permission::read | mem::permission::write)
+                  .has_value(),
+          "prepare LL/SC execution");
+  for (unsigned scenario = 0; scenario < 3; scenario++) {
+    alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{
+        mips::instruction_word{0xc0220000},
+        mips::instruction_word{scenario == 1 ? 0xac200004u : 0x24420001u},
+        mips::instruction_word{scenario == 2 ? 0xe0200000u : 0xe0220000u},
+        mips::instruction_word{0x34430000}};
+    let block = mips::translate(words, {0x8000}, arena);
+    require(block.has_value(), "translate LL/add/SC");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile LL/add/SC");
+    require((*memory)->store<std::uint32_t>({0x1000}, 0x7fffffff).has_value(),
+            "seed LL/SC target");
+    std::array<std::uint64_t, 32> registers{};
+    registers[1] = 0x1000;
+    require(native->run(registers, **memory).has_value() && registers[0] == 0 &&
+                registers[2] == (scenario == 2   ? 0xffffffff80000000ULL
+                                 : scenario == 1 ? 0
+                                                 : 1) &&
+                (*memory)->load<std::uint32_t>({0x1000}) == (scenario == 2 ? 0u
+                                                             : scenario == 1
+                                                                 ? 0x7fffffffu
+                                                                 : 0x80000000u),
+            "SC reports success, rejects intervening stores, and retains r0 "
+            "effects");
+  }
+  for (const std::uint32_t operation :
+       {0x0000000cu, 0x42000018u, 0x20210001u}) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{operation}};
+    let block = mips::translate(words, {0x8000}, arena);
+    require(block.has_value(), "translate reservation exception boundary");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile reservation exception boundary");
+    std::array<std::uint64_t, 32> registers{};
+    registers[1] = 0x7fffffff;
+    mips::cop0_state cp0;
+    require((*memory)->load_linked<std::uint32_t>({0x1000}).has_value() &&
+                native->run(registers, **memory, &cp0).has_value() &&
+                (*memory)->store_conditional<std::uint32_t>({0x1000}, 1) ==
+                    false,
+            "SYSCALL, ERET and overflow invalidate linked reservations");
+  }
 }
 
 fn unsigned_word_load() -> void {
@@ -2777,6 +2844,7 @@ fn main(int argc, char **argv) -> int {
   merged_stores<false>();
   merged_stores<true>();
   cop1_memory_transfers();
+  linked_word_operations();
   unsigned_word_load();
   indexed_cache_maintenance();
   hilo_arithmetic();

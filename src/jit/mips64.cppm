@@ -241,13 +241,14 @@ struct error {
                    op == 0x20 || op == 0x24 || op == 0x23 || op == 0x27 ||
                    op == 0x28 || op == 0x2b || op == 0x2a || op == 0x2e ||
                    op == 0x2c || op == 0x2d || op == 0x37 || op == 0x3f ||
-                   op == 0x35 || op == 0x3d;
+                   op == 0x35 || op == 0x3d || op == 0x30;
           })) +
       2 * static_cast<std::size_t>(
               std::ranges::count_if(words, [](instruction_word word) {
                 return (word.bits >> 26 == 0 && (word.bits & 63) == 0x27) ||
                        word.bits >> 26 == 0x1a || word.bits >> 26 == 0x1b ||
-                       word.bits >> 26 == 0x22 || word.bits >> 26 == 0x26;
+                       word.bits >> 26 == 0x22 || word.bits >> 26 == 0x26 ||
+                       word.bits >> 26 == 0x38;
               }));
   if (extra_nodes > std::numeric_limits<std::uint32_t>::max() ||
       words.size() > (std::numeric_limits<std::uint32_t>::max() - extra_nodes) /
@@ -319,15 +320,19 @@ struct error {
                            lui || addi || addiu || daddiu || slti || sltiu;
     const bool merge_load =
         opcode == 0x1a || opcode == 0x1b || opcode == 0x22 || opcode == 0x26;
+    const bool linked_load = opcode == 0x30;
+    const bool conditional_store = opcode == 0x38;
     const bool load_cop1 = opcode == 0x35;
     const bool store_cop1 = opcode == 0x3d;
     const bool load = merge_load || opcode == 0x21 || opcode == 0x25 ||
                       opcode == 0x20 || opcode == 0x24 || opcode == 0x23 ||
-                      opcode == 0x27 || opcode == 0x37 || load_cop1;
+                      opcode == 0x27 || opcode == 0x37 || load_cop1 ||
+                      linked_load;
     const bool merge_store =
         opcode == 0x2a || opcode == 0x2e || opcode == 0x2c || opcode == 0x2d;
     const bool store = merge_store || opcode == 0x29 || opcode == 0x28 ||
-                       opcode == 0x2b || opcode == 0x3f || store_cop1;
+                       opcode == 0x2b || opcode == 0x3f || store_cop1 ||
+                       conditional_store;
     const bool memory_access = load || store;
     const bool branch = is_branch(words[i]);
     const bool jump = opcode == 2 || opcode == 3;
@@ -669,6 +674,23 @@ struct error {
           ir::node::binary(ir::binary_kind::add_wrap, *left, *offset, source));
       if (!address)
         return failed(address.error());
+      if (conditional_store) {
+        const let value = read(rt);
+        if (!value)
+          return failed(value.error());
+        const let stored = result.append(
+            ir::node::store_conditional32(*address, *value, source));
+        if (!stored)
+          return failed(stored.error());
+        if (rt != 0) {
+          if (let written =
+                  result.append(ir::node::write({rt}, *stored, source));
+              !written)
+            return failed(written.error());
+          registers[rt] = *stored;
+        }
+        continue;
+      }
       if (load_cop1 || store_cop1) {
         const let value = result.append(
             load_cop1 ? ir::node::load(*address, source, ir::width::bits64)
@@ -725,7 +747,8 @@ struct error {
           return failed(written.error());
       } else {
         const let value = result.append(
-            opcode == 0x27   ? ir::node::load32_unsigned(*address, source)
+            linked_load      ? ir::node::load_linked32(*address, source)
+            : opcode == 0x27 ? ir::node::load32_unsigned(*address, source)
             : opcode == 0x21 ? ir::node::load16_signed(*address, source)
             : opcode == 0x25 ? ir::node::load16_unsigned(*address, source)
             : opcode == 0x24 ? ir::node::load8_unsigned(*address, source)

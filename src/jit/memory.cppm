@@ -284,6 +284,7 @@ public:
   }
 
   fn invalidate() noexcept -> void {
+    clear_reservation();
     for (let &table : first_)
       std::ranges::fill(table, cache_entry{});
     for (let &table : second_)
@@ -345,6 +346,7 @@ public:
       -> std::expected<void, fault> {
     static_assert(sizeof(T) <= 8 && !std::same_as<T, bool>);
     static_assert(Order == std::endian::big || Order == std::endian::little);
+    clear_reservation();
     constexpr let size = static_cast<access_size>(sizeof(T));
     if (address.value % sizeof(T) != 0)
       return std::unexpected(
@@ -357,6 +359,41 @@ public:
     return {};
   }
 
+  fn clear_reservation() noexcept -> void {
+    if (reservation_.host)
+      reservation_.host = nullptr;
+  }
+
+  // One execution owner. External RAM writers must clear the reservation.
+  template <std::unsigned_integral T, std::endian Order = std::endian::big>
+  [[nodiscard]] fn load_linked(virtual_address address) noexcept
+      -> std::expected<T, fault> {
+    static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+    clear_reservation();
+    const let host = ram_pointer<T, access_kind::read>(address);
+    if (!host)
+      return std::unexpected(host.error());
+    const let value = decode<T, Order>(*host);
+    reservation_ = {*host, static_cast<access_size>(sizeof(T))};
+    return value;
+  }
+
+  template <std::unsigned_integral T, std::endian Order = std::endian::big>
+  [[nodiscard]] fn store_conditional(virtual_address address, T value) noexcept
+      -> std::expected<bool, fault> {
+    static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+    const let linked = reservation_;
+    clear_reservation();
+    const let host = ram_pointer<T, access_kind::write>(address);
+    if (!host)
+      return std::unexpected(host.error());
+    if (linked.host != *host ||
+        linked.size != static_cast<access_size>(sizeof(T)))
+      return false;
+    encode<T, Order>(*host, value);
+    return true;
+  }
+
   // A single-page byte write. Device partial writes need an explicit bus
   // contract.
   [[nodiscard]] fn store_bytes(virtual_address address,
@@ -364,6 +401,7 @@ public:
       -> std::expected<void, fault> {
     if (bytes.empty())
       return {};
+    clear_reservation();
     if (bytes.size() > page_size - (address.value & (page_size - 1)))
       return std::unexpected(fault{address, fault_reason::unsupported_size,
                                    access_kind::write, access_size::byte});
@@ -438,6 +476,13 @@ private:
       64) std::array<std::array<cache_entry, first_level_entries>, 3> first_{};
   alignas(64)
       std::array<std::array<cache_entry, second_level_entries>, 3> second_{};
+
+  struct reservation {
+    std::byte *host = nullptr;
+    access_size size = access_size::word;
+  };
+
+  reservation reservation_;
   std::span<std::byte> ram_;
   std::vector<mapping> mappings_;
   std::size_t mapping_limit_ = 0;
@@ -487,6 +532,7 @@ private:
   }
 
   fn invalidate(virtual_address address) noexcept -> void {
+    clear_reservation();
     if (batch_) {
       batch_->enqueue(address);
       return;
@@ -647,6 +693,24 @@ private:
     }
     encode<T, Order>(resolved->host, value);
     return {};
+  }
+
+  template <std::unsigned_integral T, access_kind Access>
+  fn ram_pointer(virtual_address address) noexcept
+      -> std::expected<std::byte *, fault> {
+    constexpr let size = static_cast<access_size>(sizeof(T));
+    if (address.value % sizeof(T))
+      return std::unexpected(
+          fault{address, fault_reason::misaligned, Access, size});
+    if (const let cached = lookup<Access>(address))
+      return cached->host_page + (address.value & (page_size - 1));
+    const let resolved = resolve(address, Access, size);
+    if (!resolved)
+      return std::unexpected(resolved.error());
+    if (resolved->target)
+      return std::unexpected(
+          fault{address, fault_reason::unsupported_size, Access, size});
+    return resolved->host;
   }
 
   template <std::unsigned_integral T, std::endian Order, access_kind Access>

@@ -192,7 +192,81 @@ fn translated_cache() -> void {
           "invalidation rechecks write permissions without modifying RAM");
 }
 
+fn reservations() -> void {
+  std::array<std::byte, mem::page_size> ram{};
+  let space = mem::address_space::create(ram, 4);
+  require(
+      space && (*space)->map_ram({0x1000}, {0}, rw).has_value() &&
+          (*space)->map_ram({0x2000}, {0}, rw).has_value() &&
+          (*space)->map_ram({0x3000}, {0}, mem::permission::read).has_value(),
+      "map reservation aliases");
+  let &memory = **space;
+  require(memory.store_conditional<std::uint32_t>({0x1000}, 1) == false,
+          "conditional store without reservation fails");
+  require(memory.store<std::uint32_t>({0x1000}, 0x80000000).has_value() &&
+              memory.load_linked<std::uint32_t>({0x1000}) == 0x80000000 &&
+              memory.store_conditional<std::uint32_t>({0x2000}, 42) == true &&
+              memory.load<std::uint32_t>({0x1000}) == 42 &&
+              memory.store_conditional<std::uint32_t>({0x1000}, 99) == false,
+          "reservation follows physical aliases and succeeds only once");
+  require(memory.load_linked<std::uint32_t>({0x1000}).has_value() &&
+              memory.store<std::uint32_t>({0x1008}, 1).has_value() &&
+              memory.store_conditional<std::uint32_t>({0x1000}, 99) == false,
+          "ordinary writes conservatively break reservations");
+  const std::array byte{std::byte{1}};
+  require(memory.load_linked<std::uint32_t>({0x1000}).has_value() &&
+              memory.store_bytes({0x1008}, byte).has_value() &&
+              memory.store_conditional<std::uint32_t>({0x1000}, 99) == false,
+          "partial writes break reservations");
+  require(memory.load_linked<std::uint32_t>({0x1000}).has_value(),
+          "reserve before flush");
+  memory.invalidate();
+  require(memory.store_conditional<std::uint32_t>({0x1000}, 99) == false,
+          "translation flush breaks reservation");
+  require(memory.load_linked<std::uint32_t>({0x1000}).has_value() &&
+              memory.protect({0x2000}, mem::permission::read).has_value() &&
+              memory.store_conditional<std::uint32_t>({0x1000}, 99) == false,
+          "mapping edits break reservation");
+  require(memory.load_linked<std::uint32_t>({0x1000}).has_value() &&
+              !memory.load_linked<std::uint32_t>({0x1001}) &&
+              memory.store_conditional<std::uint32_t>({0x1000}, 99) == false,
+          "faulting linked load discards prior reservation");
+  require(memory.load_linked<std::uint32_t>({0x1000}).has_value() &&
+              memory.store_conditional<std::uint64_t>({0x1000}, 99) == false,
+          "reservation width must match");
+  require(memory.load_linked<std::uint32_t>({0x3000}).has_value(),
+          "reserve read-only alias");
+  const let denied = memory.store_conditional<std::uint32_t>({0x3000}, 99);
+  require(!denied && denied.error().reason == mem::fault_reason::permission &&
+              memory.store_conditional<std::uint32_t>({0x1000}, 99) == false,
+          "conditional stores validate permissions and consume reservation on "
+          "fault");
+  require(memory.load_linked<std::uint64_t>({0x1000}).has_value() &&
+              memory.store_conditional<std::uint64_t>(
+                  {0x1000}, 0x1234567887654321ULL) == true,
+          "doubleword reservations preserve all bits");
+  unsigned callbacks = 0;
+  mem::device device{
+      &callbacks,
+      [](void *context, mem::device_access) noexcept
+          -> std::expected<std::uint64_t, mem::device_error> {
+        (*static_cast<unsigned *>(context))++;
+        return 0;
+      },
+      [](void *context, mem::device_access,
+         std::uint64_t) noexcept -> std::expected<void, mem::device_error> {
+        (*static_cast<unsigned *>(context))++;
+        return {};
+      }};
+  require(memory.map_device({0x4000}, {0x100000}, device, rw).has_value() &&
+              !memory.load_linked<std::uint32_t>({0x4000}) &&
+              !memory.store_conditional<std::uint32_t>({0x4000}, 1) &&
+              callbacks == 0,
+          "linked device accesses fail without MMIO callbacks");
+}
+
 fn main() -> int {
+  reservations();
   translated_cache();
   fifo_io();
   std::array<std::byte, 3 * mem::page_size> ram{};

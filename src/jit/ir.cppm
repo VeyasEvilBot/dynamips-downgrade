@@ -81,6 +81,8 @@ enum class opcode : std::uint8_t {
   load16_unsigned,
   load32_signed,
   load32_unsigned,
+  load_linked32,
+  store_conditional32,
   load64,
   load32_left,
   load32_right,
@@ -422,6 +424,15 @@ struct node {
             width::bits64};
   }
 
+  static constexpr fn load_linked32(value_id address,
+                                     std::uint32_t source) noexcept -> node {
+    return {{.inputs = {address, {}}},
+            source,
+            {},
+            opcode::load_linked32,
+            width::bits64};
+  }
+
   static constexpr fn store16(value_id address, value_id value,
                                std::uint32_t source) noexcept -> node {
     return {{.inputs = {address, value}},
@@ -475,6 +486,16 @@ struct node {
             source,
             {},
             size == width::bits32 ? opcode::load32_signed : opcode::load64,
+            width::bits64};
+  }
+
+  static constexpr fn store_conditional32(value_id address, value_id value,
+                                           std::uint32_t source) noexcept
+      -> node {
+    return {{.inputs = {address, value}},
+            source,
+            {},
+            opcode::store_conditional32,
             width::bits64};
   }
 
@@ -886,6 +907,8 @@ private:
     case opcode::load16_unsigned:
     case opcode::load8_unsigned:
     case opcode::load8_signed:
+    case opcode::load_linked32:
+    case opcode::store_conditional32:
     case opcode::load32_unsigned:
     case opcode::load32_signed:
     case opcode::load64:
@@ -907,7 +930,8 @@ private:
           ((!produces_value(current.op) || current.op == opcode::load64_left ||
             current.op == opcode::load64_right ||
             current.op == opcode::load32_left ||
-            current.op == opcode::load32_right) &&
+            current.op == opcode::load32_right ||
+            current.op == opcode::store_conditional32) &&
            !operand_valid(current.data.inputs.right)))
         return fail(error_code::invalid_operand);
       break;
@@ -1024,6 +1048,15 @@ private:
         out =
             std::format_to(out, "  state.write i64 %v{}, %state, {}",
                            current.data.inputs.left.index, current.slot.index);
+        break;
+      case opcode::store_conditional32:
+        out = std::format_to(
+            out, "  %v{} = store.guest.conditional i32 %v{}, %v{}", i,
+            current.data.inputs.right.index, current.data.inputs.left.index);
+        break;
+      case opcode::load_linked32:
+        out = std::format_to(out, "  %v{} = load.guest.linked.s32 %v{}", i,
+                             current.data.inputs.left.index);
         break;
       case opcode::load32_left:
       case opcode::load32_right:

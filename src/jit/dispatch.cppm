@@ -168,8 +168,10 @@ public:
         result.reason = stop_reason::budget_exhausted;
         return result;
       }
-      if (state.cop0.interrupt_pending())
+      if (state.cop0.interrupt_pending()) {
+        memory_.clear_reservation();
         state.pc = state.cop0.exception(0, state.pc, false);
+      }
       if (generation_ != memory_.mapping_generation()) {
         for (let &entry : cache_)
           entry.code.reset();

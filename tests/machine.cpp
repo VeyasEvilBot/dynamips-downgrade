@@ -455,7 +455,15 @@ fn composition() -> bool {
               uart.output() == "A",
           "attach a device using data rather than chassis initialization code"))
     return false;
+  if (!check(memory.load_linked<std::uint32_t>({machine::cached_base + 0x2000})
+                 .has_value(),
+             "reserve RAM before reset"))
+    return false;
   (*board)->reset();
+  if (!check(memory.store_conditional<std::uint32_t>(
+                 {machine::cached_base + 0x2000}, 0) == false,
+             "reset clears reservation"))
+    return false;
   if (!check((*board)->cpu().pc.value == model.cpu.reset.value &&
                  (*board)->cpu().registers[1] == 0 &&
                  (*board)->cpu().registers[29] == model.cpu.boot_stack.value &&

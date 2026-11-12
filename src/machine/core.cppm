@@ -261,6 +261,7 @@ public:
   // Warm reset preserves RAM and loaded firmware; the owner calls this while
   // stopped.
   fn reset() noexcept -> void {
+    memory_->clear_reservation();
     if (!state_.cop0.translations.empty())
       memory_->invalidate();
     state_ = {};

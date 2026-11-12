@@ -172,10 +172,16 @@ private:
 
   using entry_point = std::uint64_t (*)(std::uint64_t *, execution_context *);
 
-  template <std::unsigned_integral T, bool sign_extend = true>
+  template <std::unsigned_integral T, bool sign_extend = true,
+            bool Linked = false>
   static fn load(execution_context *context, std::uint64_t address) noexcept
       -> std::uint64_t {
-    let result = context->memory->load<T>({address});
+    let result = [&] {
+      if constexpr (Linked)
+        return context->memory->load_linked<T>({address});
+      else
+        return context->memory->load<T>({address});
+    }();
     if (!result) {
       context->fault = result.error();
       context->failed = true;
@@ -250,6 +256,20 @@ private:
     }
   }
 
+  static fn store_conditional32(execution_context *context,
+                                 std::uint64_t address,
+                                 std::uint64_t value) noexcept
+      -> std::uint64_t {
+    const let result = context->memory->store_conditional<std::uint32_t>(
+        {address}, static_cast<std::uint32_t>(value));
+    if (!result) {
+      context->fault = result.error();
+      context->failed = true;
+      return 0;
+    }
+    return *result ? 1 : 0;
+  }
+
   static fn tlb_operation(execution_context *context,
                            std::uint32_t operation) noexcept -> void {
     let &cp0 = *context->cop0;
@@ -312,16 +332,19 @@ private:
 
   static fn exception_return(execution_context *context) noexcept
       -> std::uint64_t {
+    context->memory->clear_reservation();
     return context->cop0->exception_return().value;
   }
 
   static fn overflow(execution_context *context, std::uint64_t pc,
                       std::uint32_t delay_slot) noexcept -> std::uint64_t {
+    context->memory->clear_reservation();
     return context->cop0->exception(12, {pc}, delay_slot != 0).value;
   }
 
   static fn syscall(execution_context *context, std::uint64_t pc,
                      std::uint32_t delay_slot) noexcept -> std::uint64_t {
+    context->memory->clear_reservation();
     return context->cop0->exception(8, {pc}, delay_slot != 0).value;
   }
 
@@ -586,7 +609,8 @@ public:
         }
         if (node.op == ir::opcode::constant)
           continue;
-        if (node.op == ir::opcode::load32_left ||
+        if (node.op == ir::opcode::store_conditional32 ||
+            node.op == ir::opcode::load32_left ||
             node.op == ir::opcode::load32_right ||
             node.op == ir::opcode::load64_left ||
             node.op == ir::opcode::load64_right) {
@@ -599,7 +623,9 @@ public:
           if (errors.code)
             return failure(errors.code, i);
           const let target =
-              node.op == ir::opcode::load64_left
+              node.op == ir::opcode::store_conditional32
+                  ? &compiled_block::store_conditional32
+              : node.op == ir::opcode::load64_left
                   ? &compiled_block::load_merge<std::uint64_t, false>
               : node.op == ir::opcode::load64_right
                   ? &compiled_block::load_merge<std::uint64_t, true>
@@ -627,6 +653,7 @@ public:
             node.op == ir::opcode::store16 ||
             node.op == ir::opcode::load8_unsigned ||
             node.op == ir::opcode::load8_signed ||
+            node.op == ir::opcode::load_linked32 ||
             node.op == ir::opcode::load32_unsigned ||
             node.op == ir::opcode::load32_signed ||
             node.op == ir::opcode::load64 || node.op == ir::opcode::store8 ||
@@ -646,19 +673,22 @@ public:
             if (errors.code)
               return failure(errors.code, i);
             values[i] = result;
-            const let target = node.op == ir::opcode::load16_signed
-                                   ? &compiled_block::load<std::uint16_t>
-                               : node.op == ir::opcode::load16_unsigned
-                                   ? &compiled_block::load<std::uint16_t, false>
-                               : node.op == ir::opcode::load8_unsigned
-                                   ? &compiled_block::load<std::uint8_t, false>
-                               : node.op == ir::opcode::load8_signed
-                                   ? &compiled_block::load<std::uint8_t>
-                               : node.op == ir::opcode::load32_unsigned
-                                   ? &compiled_block::load<std::uint32_t, false>
-                               : node.op == ir::opcode::load32_signed
-                                   ? &compiled_block::load<std::uint32_t>
-                                   : &compiled_block::load<std::uint64_t>;
+            const let target =
+                node.op == ir::opcode::load16_signed
+                    ? &compiled_block::load<std::uint16_t>
+                : node.op == ir::opcode::load16_unsigned
+                    ? &compiled_block::load<std::uint16_t, false>
+                : node.op == ir::opcode::load8_unsigned
+                    ? &compiled_block::load<std::uint8_t, false>
+                : node.op == ir::opcode::load8_signed
+                    ? &compiled_block::load<std::uint8_t>
+                : node.op == ir::opcode::load_linked32
+                    ? &compiled_block::load<std::uint32_t, true, true>
+                : node.op == ir::opcode::load32_unsigned
+                    ? &compiled_block::load<std::uint32_t, false>
+                : node.op == ir::opcode::load32_signed
+                    ? &compiled_block::load<std::uint32_t>
+                    : &compiled_block::load<std::uint64_t>;
             status = output.invoke(
                 &call, asmjit::Imm{target},
                 asmjit::FuncSignature::build<
@@ -1088,6 +1118,8 @@ public:
         case ir::opcode::load16_unsigned:
         case ir::opcode::load8_unsigned:
         case ir::opcode::load8_signed:
+        case ir::opcode::store_conditional32:
+        case ir::opcode::load_linked32:
         case ir::opcode::load32_unsigned:
         case ir::opcode::load32_signed:
         case ir::opcode::load32_left:
