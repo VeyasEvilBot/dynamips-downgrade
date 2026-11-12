@@ -1227,6 +1227,31 @@ fn algebraic_register_identities() -> void {
   }
 }
 
+fn prefetch_hints() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create PREF compiler");
+  for (std::uint32_t hint = 0; hint < 32; hint++) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{0x34020007},
+                           mips::instruction_word{0xcc200001u | (hint << 16)},
+                           mips::instruction_word{0xcc20ffffu | (hint << 16)},
+                           mips::instruction_word{0x34020009}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block && block->info().instruction_count == 4,
+            "PREF retains guest instruction accounting");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile optional PREF hints");
+    std::array<std::uint64_t, 32> state{};
+    state[1] = UINT64_MAX;
+    const let result = native->run(state);
+    require(
+        result && *result == 0x1010 && state[1] == UINT64_MAX && state[2] == 9,
+        "PREF makes no memory or MMIO access and cannot raise address faults");
+  }
+}
+
 fn memory_barriers() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -2210,6 +2235,7 @@ fn main(int argc, char **argv) -> int {
   branches_and_dispatch();
   branch_likely();
   algebraic_register_identities();
+  prefetch_hints();
   memory_barriers();
   indexed_cache_maintenance();
   hilo_arithmetic();

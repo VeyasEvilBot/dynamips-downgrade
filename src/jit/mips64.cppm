@@ -208,6 +208,9 @@ struct error {
     if (bits == 0)
       continue;
     const let opcode = bits >> 26;
+    // PREF is advisory; coherent memory needs no prefetch transaction.
+    if (opcode == 0x33)
+      continue;
     const let rs = static_cast<std::uint16_t>((bits >> 21) & 31);
     const let rt = static_cast<std::uint16_t>((bits >> 16) & 31);
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
