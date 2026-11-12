@@ -1723,6 +1723,59 @@ template <bool Doubleword> fn merged_stores() -> void {
           "pages");
 }
 
+fn cop1_memory_transfers() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(compiler && memory &&
+              (*memory)
+                  ->map_ram({0x1000}, {0},
+                            mem::permission::read | mem::permission::write)
+                  .has_value(),
+          "prepare COP1 memory transfers");
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  const std::array words{mips::instruction_word{0xf4200000},
+                         mips::instruction_word{0xd43f0008},
+                         mips::instruction_word{0x4422f800}};
+  let block = mips::translate(words, {0x8000}, arena);
+  require(block.has_value(), "translate SDC1, LDC1 and DMFC1");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile COP1 memory transfers");
+  std::array<std::uint64_t, 32> registers{};
+  registers[1] = 0x1000;
+  mips::cop1_state cop1;
+  cop1.registers[0] = 0x7ff8123487654321ULL;
+  require((*memory)
+              ->store<std::uint64_t>({0x1008}, 0xfedcba9876543210ULL)
+              .has_value(),
+          "seed COP1 load bits");
+  require(
+      native->run(registers, **memory, nullptr, nullptr, &cop1).has_value() &&
+          (*memory)->load<std::uint64_t>({0x1000}) == cop1.registers[0] &&
+          cop1.registers[31] == 0xfedcba9876543210ULL &&
+          registers[2] == cop1.registers[31],
+      "COP1 memory transfers preserve every bit in f0 and f31");
+  const let before = ram;
+  registers[1] = 0x1001;
+  const let misaligned =
+      native->run(registers, **memory, nullptr, nullptr, &cop1);
+  require(!misaligned && misaligned.error().pc == 0x8000 &&
+              misaligned.error().access.reason ==
+                  mem::fault_reason::misaligned &&
+              ram == before,
+          "misaligned COP1 store has no partial effect");
+  registers[1] = 0x1ff8;
+  cop1.registers[31] = 99;
+  const let absent = native->run(registers, **memory, nullptr, nullptr, &cop1);
+  require(
+      !absent && absent.error().pc == 0x8004 && cop1.registers[31] == 99 &&
+          (*memory)->load<std::uint64_t>({0x1ff8}) == cop1.registers[0],
+      "faulting COP1 load preserves its destination and the preceding store");
+}
+
 fn unsigned_word_load() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -2723,6 +2776,7 @@ fn main(int argc, char **argv) -> int {
   merged_loads<true>();
   merged_stores<false>();
   merged_stores<true>();
+  cop1_memory_transfers();
   unsigned_word_load();
   indexed_cache_maintenance();
   hilo_arithmetic();

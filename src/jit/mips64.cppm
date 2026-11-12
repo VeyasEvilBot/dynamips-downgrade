@@ -240,7 +240,8 @@ struct error {
                    op == 0x21 || op == 0x25 || op == 0x29 || op == 0x09 ||
                    op == 0x20 || op == 0x24 || op == 0x23 || op == 0x27 ||
                    op == 0x28 || op == 0x2b || op == 0x2a || op == 0x2e ||
-                   op == 0x2c || op == 0x2d || op == 0x37 || op == 0x3f;
+                   op == 0x2c || op == 0x2d || op == 0x37 || op == 0x3f ||
+                   op == 0x35 || op == 0x3d;
           })) +
       2 * static_cast<std::size_t>(
               std::ranges::count_if(words, [](instruction_word word) {
@@ -318,13 +319,15 @@ struct error {
                            lui || addi || addiu || daddiu || slti || sltiu;
     const bool merge_load =
         opcode == 0x1a || opcode == 0x1b || opcode == 0x22 || opcode == 0x26;
+    const bool load_cop1 = opcode == 0x35;
+    const bool store_cop1 = opcode == 0x3d;
     const bool load = merge_load || opcode == 0x21 || opcode == 0x25 ||
                       opcode == 0x20 || opcode == 0x24 || opcode == 0x23 ||
-                      opcode == 0x27 || opcode == 0x37;
+                      opcode == 0x27 || opcode == 0x37 || load_cop1;
     const bool merge_store =
         opcode == 0x2a || opcode == 0x2e || opcode == 0x2c || opcode == 0x2d;
     const bool store = merge_store || opcode == 0x29 || opcode == 0x28 ||
-                       opcode == 0x2b || opcode == 0x3f;
+                       opcode == 0x2b || opcode == 0x3f || store_cop1;
     const bool memory_access = load || store;
     const bool branch = is_branch(words[i]);
     const bool jump = opcode == 2 || opcode == 3;
@@ -666,6 +669,20 @@ struct error {
           ir::node::binary(ir::binary_kind::add_wrap, *left, *offset, source));
       if (!address)
         return failed(address.error());
+      if (load_cop1 || store_cop1) {
+        const let value = result.append(
+            load_cop1 ? ir::node::load(*address, source, ir::width::bits64)
+                      : ir::node::read_cop1_64({rt}, source));
+        if (!value)
+          return failed(value.error());
+        if (let written = result.append(
+                load_cop1 ? ir::node::write_cop1_64({rt}, *value, source)
+                          : ir::node::store(*address, *value, source,
+                                            ir::width::bits64));
+            !written)
+          return failed(written.error());
+        continue;
+      }
       if (merge_load) {
         const let previous = read(rt);
         if (!previous)
