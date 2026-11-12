@@ -277,6 +277,7 @@ public:
           break;
         case ir::opcode::constant:
         case ir::opcode::shift_right_arithmetic32:
+        case ir::opcode::shift_left32:
         case ir::opcode::shift_right32:
         case ir::opcode::sign_extend32:
         case ir::opcode::unsigned_less:
@@ -554,13 +555,17 @@ public:
         case ir::opcode::constant:
           break;
         case ir::opcode::shift_right_arithmetic32:
+        case ir::opcode::shift_left32:
         case ir::opcode::shift_right32: {
           const let input = operand(node.data.shift.value);
           if (!input)
             return failure(input.error(), i);
           status = output.mov(result.r32(), input->r32());
           if (!status)
-            status = node.op == ir::opcode::shift_right32
+            status = node.op == ir::opcode::shift_left32
+                         ? output.shl(result.r32(),
+                                      asmjit::Imm{node.data.shift.amount})
+                     : node.op == ir::opcode::shift_right32
                          ? output.shr(result.r32(),
                                       asmjit::Imm{node.data.shift.amount})
                          : output.sar(result.r32(),

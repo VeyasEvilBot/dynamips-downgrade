@@ -43,6 +43,7 @@ enum class opcode : std::uint8_t {
   read_state,
   shift_right_arithmetic32,
   shift_right32,
+  shift_left32,
   sign_extend32,
   unsigned_less,
   signed_less,
@@ -147,6 +148,15 @@ struct node {
             source,
             {},
             opcode::shift_right32,
+            width::bits64};
+  }
+
+  static constexpr fn shift_left32(value_id value, std::uint32_t amount,
+                                    std::uint32_t source) noexcept -> node {
+    return {{.shift = {value, amount}},
+            source,
+            {},
+            opcode::shift_left32,
             width::bits64};
   }
 
@@ -534,6 +544,7 @@ private:
         return fail(error_code::invalid_operand);
       break;
     case opcode::shift_right_arithmetic32:
+    case opcode::shift_left32:
     case opcode::shift_right32:
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
@@ -599,11 +610,13 @@ private:
                              current.data.immediate);
         break;
       case opcode::shift_right_arithmetic32:
+      case opcode::shift_left32:
       case opcode::shift_right32:
         out = std::format_to(
             out, "  %v{} = {} %v{}, {}", i,
-            current.op == opcode::shift_right32 ? "lshr.i32.sext"
-                                                : "ashr.i32.sext",
+            current.op == opcode::shift_left32    ? "shl.i32.sext"
+            : current.op == opcode::shift_right32 ? "lshr.i32.sext"
+                                                  : "ashr.i32.sext",
             current.data.shift.value.index, current.data.shift.amount);
         break;
       case opcode::sign_extend32:
@@ -709,12 +722,15 @@ private:
     return std::unexpected(valid.error());
   std::size_t folded = 0;
   for (let &current : value.edit_nodes()) {
-    if (current.op == opcode::shift_right32 ||
+    if (current.op == opcode::shift_left32 ||
+        current.op == opcode::shift_right32 ||
         current.op == opcode::shift_right_arithmetic32) {
       const let &input = value.nodes()[current.data.shift.value.index];
       if (input.op == opcode::constant) {
         const let input32 = static_cast<std::uint32_t>(input.data.immediate);
-        const let word = current.op == opcode::shift_right32
+        const let word = current.op == opcode::shift_left32
+                             ? input32 << current.data.shift.amount
+                         : current.op == opcode::shift_right32
                              ? input32 >> current.data.shift.amount
                              : std::bit_cast<std::uint32_t>(
                                    std::bit_cast<std::int32_t>(input32) >>

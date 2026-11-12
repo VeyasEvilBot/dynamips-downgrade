@@ -478,7 +478,7 @@ fn mmio_console() -> void {
 fn word_shifts() -> void {
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create word shift compiler");
-  for (const unsigned function : {2u, 3u}) {
+  for (const unsigned function : {0u, 2u, 3u}) {
     for (std::uint32_t amount = 0; amount < 32; amount++) {
       alignas(std::max_align_t) std::array<std::byte, 8192> storage;
       std::pmr::monotonic_buffer_resource arena{
@@ -486,25 +486,66 @@ fn word_shifts() -> void {
       const std::array words{mips::instruction_word{(1u << 16) | (2u << 11) |
                                                     (amount << 6) | function}};
       let block = mips::translate(words, {0x1000}, arena);
-      require(block.has_value(), "translate SRL");
+      require(block.has_value(), "translate word shift");
       let native = compiler->compile(*block, arena);
-      require(native.has_value(), "compile SRL");
+      require(native.has_value(), "compile word shift");
       for (const std::uint64_t bits :
            {0ULL, 0x80000000ULL, 0xffffffffULL, 0x1234567887654321ULL}) {
         std::array<std::uint64_t, 32> state{};
         state[1] = bits;
         const let low = static_cast<std::uint32_t>(bits);
-        const let word = function == 2
+        const let word = function == 0 ? low << amount
+                         : function == 2
                              ? low >> amount
                              : std::bit_cast<std::uint32_t>(
                                    std::bit_cast<std::int32_t>(low) >> amount);
-        require(native->run(state).has_value() &&
-                    state[2] == static_cast<std::uint64_t>(std::int64_t{
-                                    std::bit_cast<std::int32_t>(word)}),
-                "SRL shifts the low word and sign extends its result");
+        require(
+            native->run(state).has_value() &&
+                state[2] == static_cast<std::uint64_t>(std::int64_t{
+                                std::bit_cast<std::int32_t>(word)}),
+            "word shifts operate on the low word and sign extend the result");
       }
     }
   }
+}
+
+fn word_addition() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create word addition compiler");
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{mips::instruction_word{0x00221821}};
+  let block = mips::translate(words, {0x1000}, arena);
+  require(block.has_value(), "translate ADDU");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile ADDU");
+  for (const std::uint64_t left :
+       {0ULL, 0x7fffffffULL, 0xffffffffULL, 0x1234567880000000ULL}) {
+    for (const std::uint64_t right : {0ULL, 1ULL, 0xffffffffffffffffULL}) {
+      std::array<std::uint64_t, 32> state{};
+      state[1] = left;
+      state[2] = right;
+      const let low = static_cast<std::uint32_t>(left + right);
+      require(
+          native->run(state).has_value() &&
+              state[3] == static_cast<std::uint64_t>(
+                              std::int64_t{std::bit_cast<std::int32_t>(low)}),
+          "ADDU wraps at 32 bits and sign extends without an overflow trap");
+    }
+  }
+  constexpr std::array constants{mips::instruction_word{0x3401ffff},
+                                 mips::instruction_word{0x00010fc0},
+                                 mips::instruction_word{0x00211821}};
+  let folded = mips::translate(constants, {0x1000}, arena);
+  require(folded && ir::optimize(*folded, ir::fold_constants).has_value(),
+          "fold SLL and ADDU");
+  let folded_native = compiler->compile(*folded, arena);
+  require(folded_native.has_value(), "compile folded word operations");
+  std::array<std::uint64_t, 32> state{};
+  require(folded_native->run(state).has_value() &&
+              state[1] == 0xffffffff80000000ULL && state[3] == 0,
+          "constant folding agrees with word shift and addition overflow");
 }
 
 fn cop0_writes() -> void {
@@ -1455,6 +1496,7 @@ fn main(int argc, char **argv) -> int {
   observed_stores();
   memory_operations();
   word_shifts();
+  word_addition();
   cop0_writes();
   cop0_full_width();
   byte_stores();

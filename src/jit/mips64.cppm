@@ -130,8 +130,9 @@ struct error {
   const let extra_nodes = static_cast<std::size_t>(
       std::ranges::count_if(words, [](instruction_word word) {
         const let op = word.bits >> 26;
-        return op == 0x09 || op == 0x20 || op == 0x23 || op == 0x28 ||
-               op == 0x2b || op == 0x37 || op == 0x3f;
+        return (op == 0 && (word.bits & 63) == 0x21) || op == 0x09 ||
+               op == 0x20 || op == 0x23 || op == 0x28 || op == 0x2b ||
+               op == 0x37 || op == 0x3f;
       }));
   if (extra_nodes > std::numeric_limits<std::uint32_t>::max() ||
       words.size() > (std::numeric_limits<std::uint32_t>::max() - extra_nodes) /
@@ -165,7 +166,9 @@ struct error {
     const bool hilo_write =
         opcode == 0 && (function == 0x11 || function == 0x13);
     const bool syscall = opcode == 0 && function == 0x0c;
-    const bool word_shift = opcode == 0 && (function == 2 || function == 3);
+    const bool word_shift =
+        opcode == 0 && (function == 0 || function == 2 || function == 3);
+    const bool addu = opcode == 0 && function == 0x21;
     const bool mfc0 = opcode == 0x10 && (rs == 0 || rs == 1);
     const bool mtc0 = opcode == 0x10 && (rs == 4 || rs == 5);
     const bool lui = opcode == 0x0f;
@@ -183,7 +186,7 @@ struct error {
     const bool indirect = opcode == 0 && (function == 8 || function == 9);
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift && !syscall && !hilo_read &&
-        !hilo_write &&
+        !hilo_write && !addu &&
         !(opcode == 0 &&
           (function == 0x24 || function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
@@ -291,7 +294,9 @@ struct error {
       if (!input)
         return failed(input.error());
       const let value = result.append(
-          function == 2
+          function == 0
+              ? ir::node::shift_left32(*input, (bits >> 6) & 31, source)
+          : function == 2
               ? ir::node::shift_right32(*input, (bits >> 6) & 31, source)
               : ir::node::shift_right_arithmetic32(*input, (bits >> 6) & 31,
                                                    source));
@@ -422,7 +427,7 @@ struct error {
         result.append(ir::node::binary(operation, *left, *right, source));
     if (!value)
       return failed(value.error());
-    if (addiu) {
+    if (addiu || addu) {
       value = result.append(ir::node::sign_extend32(*value, source));
       if (!value)
         return failed(value.error());
