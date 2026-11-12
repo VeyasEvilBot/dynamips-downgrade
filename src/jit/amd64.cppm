@@ -429,6 +429,11 @@ public:
             return failure(status, i);
           guarded_slot = true;
         }
+        if (node.op == ir::opcode::memory_barrier) {
+          if (const let status = output.mfence())
+            return failure(status, i);
+          continue;
+        }
         if (node.op == ir::opcode::alias) {
           const let input = operand(node.data.inputs.left);
           if (!input)
@@ -849,6 +854,7 @@ public:
         case ir::opcode::read_hilo:
         case ir::opcode::write_hilo:
         case ir::opcode::add_checked32:
+        case ir::opcode::memory_barrier:
         case ir::opcode::cache_index:
         case ir::opcode::exception_return:
         case ir::opcode::syscall:

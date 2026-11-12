@@ -1227,6 +1227,57 @@ fn algebraic_register_identities() -> void {
   }
 }
 
+fn memory_barriers() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create SYNC compiler");
+  for (const std::uint32_t subtype : {0u, 1u, 31u}) {
+    alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{0x34010007},
+                           mips::instruction_word{0x0000000fu | (subtype << 6)},
+                           mips::instruction_word{0x34010009}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(
+        block && block->info().instruction_count == 2 &&
+            ir::optimize(*block, ir::fold_constants, ir::simplify_identities)
+                .has_value() &&
+            std::format("{}", *block).find("fence memory") != std::string::npos,
+        "SYNC is a full completion barrier and explicit IR block boundary");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile full memory fence");
+    std::array<std::uint64_t, 32> state{};
+    const let result = native->run(state);
+    require(result && *result == 0x1008 && state[1] == 7,
+            "SYNC preserves earlier state and excludes later instructions");
+    const std::array invalid{mips::instruction_word{0x0020000f}};
+    require(!mips::translate(invalid, {0x1000}, arena),
+            "SYNC rejects reserved register fields");
+  }
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  const let rwx =
+      mem::permission::read | mem::permission::write | mem::permission::execute;
+  require(memory && (*memory)->map_ram({0x1000}, {0}, rwx).has_value(),
+          "map guest synchronization program");
+  constexpr std::array words{0x34011100u, 0x340200abu, 0xac220000u,
+                             0x0000000fu, 0x8c230000u, 0x70000000u};
+  for (std::size_t i = 0; i < words.size(); i++)
+    require(
+        (*memory)->store<std::uint32_t>({0x1000 + i * 4}, words[i]).has_value(),
+        "install guest synchronization program");
+  let dispatch = jit::memory_dispatcher::create(**memory);
+  require(dispatch.has_value(), "create synchronization dispatcher");
+  mips::state state;
+  state.pc = {0x1000};
+  const let result = (*dispatch)->run_slice(state, 100);
+  require(!result && result.error().pc == 0x1014 &&
+              state.registers[3] == 0xab &&
+              (*memory)->load<std::uint32_t>({0x1100}) == 0xab,
+          "guest stores complete before loads across SYNC");
+}
+
 fn indexed_cache_maintenance() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -2159,6 +2210,7 @@ fn main(int argc, char **argv) -> int {
   branches_and_dispatch();
   branch_likely();
   algebraic_register_identities();
+  memory_barriers();
   indexed_cache_maintenance();
   hilo_arithmetic();
   hilo_transfers();

@@ -37,6 +37,7 @@ struct state_slot {
 enum class width : std::uint8_t { bits32 = 32, bits64 = 64 };
 enum class opcode : std::uint8_t {
   syscall,
+  memory_barrier,
   cache_index,
   exception_return,
   constant,
@@ -82,12 +83,13 @@ enum class opcode : std::uint8_t {
 };
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
-  return op != opcode::cache_index && op != opcode::multiply32 &&
-         op != opcode::divide_unsigned32 && op != opcode::exception_return &&
-         op != opcode::write_hilo && op != opcode::syscall &&
-         op != opcode::write_cop0_64 && op != opcode::write_cop0 &&
-         op != opcode::write_state && op != opcode::store16 &&
-         op != opcode::store8 && op != opcode::store32 && op != opcode::store64;
+  return op != opcode::memory_barrier && op != opcode::cache_index &&
+         op != opcode::multiply32 && op != opcode::divide_unsigned32 &&
+         op != opcode::exception_return && op != opcode::write_hilo &&
+         op != opcode::syscall && op != opcode::write_cop0_64 &&
+         op != opcode::write_cop0 && op != opcode::write_state &&
+         op != opcode::store16 && op != opcode::store8 &&
+         op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t {
@@ -129,6 +131,11 @@ struct node {
   static constexpr fn alias(value_id input, std::uint32_t source,
                              width type = width::bits64) noexcept -> node {
     return {{.inputs = {input, {}}}, source, {}, opcode::alias, type};
+  }
+
+  static constexpr fn memory_barrier(std::uint32_t source) noexcept -> node {
+    return {
+        {.immediate = 0}, source, {}, opcode::memory_barrier, width::bits64};
   }
 
   static constexpr fn cache_index(std::uint32_t operation, value_id address,
@@ -649,6 +656,7 @@ private:
       if (current.slot.index > 1 || !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::memory_barrier:
     case opcode::exception_return:
     case opcode::syscall:
       if (current.type != width::bits64)
@@ -778,6 +786,9 @@ private:
       case opcode::alias:
         out = std::format_to(out, "  %v{} = alias i{} %v{}", i, bits,
                              current.data.inputs.left.index);
+        break;
+      case opcode::memory_barrier:
+        out = std::format_to(out, "  fence memory");
         break;
       case opcode::cache_index:
         out = std::format_to(out, "  cache.index.{} %v{}",

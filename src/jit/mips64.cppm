@@ -153,7 +153,8 @@ struct error {
     return std::unexpected(error{error_code::unaligned_pc, 0});
   for (std::size_t i = 0; i < words.size(); i++) {
     if (words[i].bits >> 26 == 0x2f || words[i].bits == 0x42000018 ||
-        ((words[i].bits >> 26) == 0 && (words[i].bits & 63) == 0x0c)) {
+        ((words[i].bits >> 26) == 0 &&
+         ((words[i].bits & 63) == 0x0c || (words[i].bits & 63) == 0x0f))) {
       words = words.first(i + 1);
       break;
     }
@@ -219,6 +220,7 @@ struct error {
         opcode == 0 && (function == 0x11 || function == 0x13);
     const bool cache = opcode == 0x2f;
     const bool eret = bits == 0x42000018;
+    const bool sync = opcode == 0 && function == 0x0f;
     const bool syscall = opcode == 0 && function == 0x0c;
     const bool variable_shift =
         opcode == 0 && (function == 4 || function == 6 || function == 7);
@@ -252,18 +254,20 @@ struct error {
     const bool jump = opcode == 2 || opcode == 3;
     const bool indirect = opcode == 0 && (function == 8 || function == 9);
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !eret &&
-        !cache && !hilo_read && !hilo_write && !addu && !subu && !slt &&
-        !sltu && !variable_shift && !nor && !hilo_arithmetic &&
+        !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !sync &&
+        !eret && !cache && !hilo_read && !hilo_write && !addu && !subu &&
+        !slt && !sltu && !variable_shift && !nor && !hilo_arithmetic &&
         !(opcode == 0 && (function == 0x24 || function == 0x25 ||
                           function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !eret &&
-        !cache && !hilo_read && !hilo_write && ((bits >> 6) & 31) != 0)
+        !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !sync &&
+        !eret && !cache && !hilo_read && !hilo_write && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((hilo_read && (rs != 0 || rt != 0 || ((bits >> 6) & 31) != 0)) ||
         (hilo_write && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0)))
+      return std::unexpected(error{error_code::invalid_encoding, i});
+    if (sync && (bits & 0xfffff83fu) != 0x0000000fu)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (cache && rt > 1)
       return std::unexpected(error{error_code::unsupported_instruction, i});
@@ -285,7 +289,7 @@ struct error {
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = mfc0 || immediate || memory_access ? rt : rd;
     if (destination == 0 && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !syscall && !eret && !cache && !hilo_write && !addi &&
+        !mtc0 && !syscall && !sync && !eret && !cache && !hilo_write && !addi &&
         !hilo_arithmetic)
       continue;
     const let source = static_cast<std::uint32_t>(i);
@@ -295,6 +299,12 @@ struct error {
                                        : error_code::invalid_ir,
                                    i});
     };
+    if (sync) {
+      if (let fenced = result.append(ir::node::memory_barrier(source));
+          !fenced)
+        return failed(fenced.error());
+      continue;
+    }
     if (eret) {
       if (let returned = result.append(ir::node::exception_return(source));
           !returned)
