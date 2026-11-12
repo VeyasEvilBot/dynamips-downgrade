@@ -111,7 +111,8 @@ fn run(const char *rom_path, const char *ios_path, std::uint64_t budget,
        {ios ? ios->entry() : 0},
        ios ? ios->machine_id() : std::uint16_t{0},
        static_cast<std::uint32_t>(dynamips::c7200::npe400.ram_bytes /
-                                  (1024 * 1024))}};
+                                  (1024 * 1024)),
+       dynamips::c7200::configuration_register}};
   std::array<std::byte, 128 * 1024> nvram_bytes{};
   dynamips::devices::byte_memory nvram{{0x1e000000}, nvram_bytes};
   const std::array attachments{

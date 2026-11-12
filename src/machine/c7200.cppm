@@ -1,6 +1,7 @@
 module;
 
 #include <array>
+#include <cstdint>
 
 export module machine.c7200;
 
@@ -20,6 +21,8 @@ export inline constexpr machine::window_id gt64120{0};
 export inline constexpr machine::window_id rom_services{1};
 export inline constexpr machine::window_id nvram{3};
 export inline constexpr machine::window_id io_fpga{5};
+
+export inline constexpr std::uint16_t configuration_register = 0x2102;
 
 export inline constexpr machine::definition npe400{
     "c7200-npe400",

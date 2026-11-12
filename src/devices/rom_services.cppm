@@ -21,6 +21,7 @@ struct rom_boot_info {
   jit::memory::virtual_address ios_entry{};
   std::uint16_t elf_machine_id = 0;
   std::uint32_t ram_megabytes = 0;
+  std::uint16_t configuration_register = 0;
 };
 
 enum class rom_output : std::uint8_t { console, log };
@@ -80,6 +81,9 @@ private:
       break;
     case 0x14:
       value = self.boot_.ram_megabytes;
+      break;
+    case 0x24:
+      value = self.boot_.configuration_register;
       break;
     case 0x28:
       value = static_cast<std::uint32_t>(self.boot_.ios_entry.value);
