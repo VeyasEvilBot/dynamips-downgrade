@@ -6,6 +6,7 @@ module;
 export module machine.c7200;
 
 import machine.core;
+import devices.gt64120;
 
 namespace dynamips::c7200 {
 // Register windows from common/dev_c7200.c; unattached windows fault on access.
@@ -40,6 +41,15 @@ export inline constexpr std::array<std::uint16_t, 32> vxr_eeprom{
     0x0000, 0x0000, 0x6335, 0x8B28, 0x631D, 0x0000, 0x608E, 0x6D1C,
     0x62BB, 0x0000, 0x6335, 0x8B28, 0x0000, 0x0000, 0x6335, 0x8B28,
 };
+
+export inline constexpr std::array npe400_bridges{
+    devices::pci_bridge_definition{0, 1, devices::bridge_model::dec21050},
+    devices::pci_bridge_definition{0, 7, devices::bridge_model::dec21150},
+    devices::pci_bridge_definition{0, 8, devices::bridge_model::dec21150},
+    devices::pci_bridge_definition{0, 9, devices::bridge_model::dec21150},
+    devices::pci_bridge_definition{1, 7, devices::bridge_model::dec21150},
+    devices::pci_bridge_definition{1, 8, devices::bridge_model::dec21150},
+    devices::pci_bridge_definition{1, 9, devices::bridge_model::dec21150}};
 
 export inline constexpr std::uint16_t configuration_register = 0x2102;
 

@@ -246,7 +246,54 @@ fn controller_configuration() -> bool {
             "controller decode-window setup matches legacy inactive windows"))
       return false;
   }
+  using dynamips::devices::bridge_model;
+  using dynamips::devices::pci_bridge_definition;
+  const std::array invalid{pci_bridge_definition{2, 1, bridge_model::dec21050}};
+  const std::array duplicate{
+      pci_bridge_definition{0, 1, bridge_model::dec21050},
+      pci_bridge_definition{0, 1, bridge_model::dec21150}};
+  if (!check(!controller.configure_bridges(invalid) &&
+                 !controller.configure_bridges(duplicate) &&
+                 controller.configure_bridges(dynamips::c7200::npe400_bridges)
+                     .has_value(),
+             "validate and install NPE-400 bridge definitions"))
+    return false;
+  for (const let &bridge : dynamips::c7200::npe400_bridges) {
+    const std::uint64_t selector = bridge.root ? 0xcf0 : 0xcf8;
+    const std::uint64_t data = 0x4000 + selector + 4;
+    const std::uint32_t address =
+        0x80000000u | (std::uint32_t{bridge.device} << 11);
+    const std::uint32_t identity =
+        (static_cast<std::uint32_t>(bridge.model) << 16) | 0x1011u;
+    if (!check(write_address(selector, address).has_value() &&
+                   (*memory)->load<std::uint32_t>({data}) ==
+                       std::byteswap(identity) &&
+                   write_address(selector, address | 8).has_value() &&
+                   (*memory)->load<std::uint32_t>({data}) ==
+                       std::byteswap(0x06040000u) &&
+                   write_address(selector, address | 0x18).has_value() &&
+                   (*memory)
+                       ->store<std::uint32_t>(
+                           {data}, std::byteswap(0x00030200u + bridge.device))
+                       .has_value() &&
+                   (*memory)->load<std::uint32_t>({data}) ==
+                       std::byteswap(0x00030200u + bridge.device),
+               "built-in PCI bridges expose identities, class and programmable "
+               "bus numbers"))
+      return false;
+  }
+  if (!check(write_address(0xcf8, 0x80000818).has_value() &&
+                 (*memory)->load<std::uint32_t>({0x4cfc}) ==
+                     std::byteswap(0x00030201u),
+             "bridge configuration is independent across devices and roots"))
+    return false;
   bus.reset();
+  if (!check(write_address(0xcf8, 0x80000818).has_value() &&
+                 (*memory)->load<std::uint32_t>({0x4cfc}) == 0,
+             "reset clears bridge bus-number programming"))
+    return false;
+  if (!write_address(0xcf8, 0))
+    return false;
   return check((*memory)->load<std::uint32_t>({0x4c1c}) == 0 &&
                    (*memory)->load<std::uint32_t>({0x4cf8}) == 0,
                "controller reset restores masks and configuration selectors");

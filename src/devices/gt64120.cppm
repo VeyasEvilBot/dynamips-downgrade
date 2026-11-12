@@ -3,13 +3,26 @@ module;
 #include <bit>
 #include <cstdint>
 #include <expected>
+#include <span>
 #include <dynamips/macros.h>
 export module devices.gt64120;
 import jit.devices;
 import jit.memory;
 
 export namespace dynamips::devices {
-// Startup registers and empty PCI buses; DMA engines are not implemented.
+enum class bridge_model : std::uint16_t {
+  dec21050 = 0x0001,
+  dec21150 = 0x0023
+};
+
+struct pci_bridge_definition {
+  std::uint8_t root;
+  std::uint8_t device;
+  bridge_model model;
+};
+enum class bridge_error { capacity, invalid_definition, duplicate_device };
+
+// Startup registers and PCI configuration. DMA engines are not implemented.
 class gt64120 {
 public:
   explicit gt64120(jit::memory::physical_address base) noexcept
@@ -18,9 +31,33 @@ public:
   gt64120(const gt64120 &) = delete;
   fn operator=(const gt64120 &) -> gt64120 & = delete;
   fn reset() noexcept -> void {
+    bridge_bus_ = {};
     pci_address_ = {};
     interrupt_mask_ = 0;
   }
+
+  // Configure while stopped; borrowed definitions outlive the controller.
+  [[nodiscard]] fn
+  configure_bridges(std::span<const pci_bridge_definition> definitions) noexcept
+      -> std::expected<void, bridge_error> {
+    if (definitions.size() > bridge_bus_.size())
+      return std::unexpected(bridge_error::capacity);
+    for (std::size_t i = 0; i < definitions.size(); i++) {
+      const let &value = definitions[i];
+      if (value.root > 1 || value.device == 0 || value.device > 31 ||
+          (value.model != bridge_model::dec21050 &&
+           value.model != bridge_model::dec21150))
+        return std::unexpected(bridge_error::invalid_definition);
+      for (std::size_t j = 0; j < i; j++)
+        if (definitions[j].root == value.root &&
+            definitions[j].device == value.device)
+          return std::unexpected(bridge_error::duplicate_device);
+    }
+    bridges_ = definitions;
+    bridge_bus_ = {};
+    return {};
+  }
+
   fn descriptor() noexcept -> jit::devices::descriptor {
     return {&endpoint_,
             jit::devices::widths::word,
@@ -36,18 +73,47 @@ private:
   jit::memory::physical_address base_;
   std::array<std::uint32_t, 2> pci_address_{};
   std::uint32_t interrupt_mask_ = 0;
+  std::span<const pci_bridge_definition> bridges_;
+  std::array<std::uint32_t, 8> bridge_bus_{};
   jit::memory::device endpoint_;
 
-  fn pci_read(unsigned bus) const noexcept -> std::uint32_t {
-    const let address = pci_address_[bus];
+  fn pci_read(unsigned root) const noexcept -> std::uint32_t {
+    const let address = pci_address_[root];
     const let reg = address & 255;
-    if (bus != 0 || (address & 0x00ffff00) != 0)
+    const let device = (address >> 11) & 31;
+    if ((address & 0x00ff0700) != 0)
       return reg == 0 ? 0xffffffffu : 0;
-    if (reg == 0)
-      return 0x462011ab;
-    if (reg == 8)
-      return 0x03008005;
-    return 0;
+    if (root == 0 && device == 0) {
+      if (reg == 0)
+        return 0x462011ab;
+      if (reg == 8)
+        return 0x03008005;
+      return 0;
+    }
+    for (std::size_t i = 0; i < bridges_.size(); i++) {
+      const let &bridge = bridges_[i];
+      if (bridge.root != root || bridge.device != device)
+        continue;
+      if (reg == 0)
+        return (static_cast<std::uint32_t>(bridge.model) << 16) | 0x1011u;
+      if (reg == 8)
+        return 0x06040000;
+      if (reg == 0x18)
+        return bridge_bus_[i];
+      return 0;
+    }
+    return reg == 0 ? 0xffffffffu : 0;
+  }
+  fn pci_write(unsigned root, std::uint32_t value) noexcept -> void {
+    const let address = pci_address_[root];
+    if ((address & 0x00ff07ff) != 0x18)
+      return;
+    const let device = (address >> 11) & 31;
+    for (std::size_t i = 0; i < bridges_.size(); i++)
+      if (bridges_[i].root == root && bridges_[i].device == device) {
+        bridge_bus_[i] = value;
+        return;
+      }
   }
 
   static fn read(void *context, jit::memory::device_access access) noexcept
@@ -150,7 +216,10 @@ private:
       self.pci_address_[0] = static_cast<std::uint32_t>(value);
       return {};
     case 0xcf4:
+      self.pci_write(1, static_cast<std::uint32_t>(value));
+      return {};
     case 0xcfc:
+      self.pci_write(0, static_cast<std::uint32_t>(value));
       return {};
     default:
       const let known = read(context, access);
