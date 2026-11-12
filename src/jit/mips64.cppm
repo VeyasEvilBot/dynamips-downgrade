@@ -48,7 +48,21 @@ constexpr fn jump_target(instruction_word word, guest_address pc) noexcept
 }
 
 struct cop0_state {
-  std::array<std::uint32_t, 32> registers{};
+  std::array<std::uint64_t, 32> registers{};
+
+  fn syscall(guest_address pc, bool delay_slot) noexcept -> guest_address {
+    let &status = registers[12];
+    let &cause = registers[13];
+    cause = (cause & ~std::uint64_t{0x7c}) | (8u << 2);
+    if (!(status & 2)) {
+      registers[14] = pc.value;
+      cause = (cause & ~(std::uint64_t{1} << 31)) |
+              (delay_slot ? std::uint64_t{1} << 31 : 0);
+    }
+    status |= 2;
+    return {status & (1u << 22) ? 0xffffffffbfc00380ULL
+                                : 0xffffffff80000180ULL};
+  }
 
   fn write(std::uint16_t slot, std::uint32_t value) noexcept -> void {
     if (slot == 15 || slot == 16)
@@ -94,6 +108,10 @@ struct error {
   if (start.value % 4 != 0)
     return std::unexpected(error{error_code::unaligned_pc, 0});
   for (std::size_t i = 0; i < words.size(); i++) {
+    if ((words[i].bits >> 26) == 0 && (words[i].bits & 63) == 0x0c) {
+      words = words.first(i + 1);
+      break;
+    }
     if (!has_delay_slot(words[i]))
       continue;
     if (i + 1 == words.size())
@@ -137,6 +155,7 @@ struct error {
     const let rt = static_cast<std::uint16_t>((bits >> 16) & 31);
     const let rd = static_cast<std::uint16_t>((bits >> 11) & 31);
     const let function = bits & 63;
+    const bool syscall = opcode == 0 && function == 0x0c;
     const bool word_shift = opcode == 0 && (function == 2 || function == 3);
     const bool mfc0 = opcode == 0x10 && rs == 0;
     const bool mtc0 = opcode == 0x10 && rs == 4;
@@ -154,12 +173,12 @@ struct error {
     const bool jump = opcode == 2 || opcode == 3;
     const bool indirect = opcode == 0 && (function == 8 || function == 9);
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !word_shift &&
+        !mtc0 && !mfc0 && !word_shift && !syscall &&
         !(opcode == 0 &&
           (function == 0x24 || function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !mfc0 && !word_shift && ((bits >> 6) & 31) != 0)
+        !mtc0 && !mfc0 && !word_shift && !syscall && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (word_shift && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
@@ -174,7 +193,7 @@ struct error {
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination = mfc0 || immediate || memory_access ? rt : rd;
     if (destination == 0 && !memory_access && !branch && !jump && !indirect &&
-        !mtc0)
+        !mtc0 && !syscall)
       continue;
     const let source = static_cast<std::uint32_t>(i);
     const let failed = [&](ir::error failure) {
@@ -183,6 +202,11 @@ struct error {
                                        : error_code::invalid_ir,
                                    i});
     };
+    if (syscall) {
+      if (let raised = result.append(ir::node::syscall(source)); !raised)
+        return failed(raised.error());
+      continue;
+    }
     if (lui) {
       const let bits32 = static_cast<std::int32_t>((bits & 0xffffu) << 16);
       const let value = result.append(ir::node::constant(

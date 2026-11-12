@@ -148,7 +148,8 @@ private:
         continue;
       }
       const let op = *fetched >> 26;
-      if ((op >= 0x28 && op <= 0x2f) || op >= 0x38 || op == 0x10)
+      if ((op == 0 && (*fetched & 63) == 0x0c) || (op >= 0x28 && op <= 0x2f) ||
+          op >= 0x38 || op == 0x10)
         break;
     }
     let native = compile_native_block(std::span{words}.first(count), {pc},

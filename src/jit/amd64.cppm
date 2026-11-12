@@ -175,10 +175,15 @@ private:
     }
   }
 
+  static fn syscall(execution_context *context, std::uint64_t pc,
+                     std::uint32_t delay_slot) noexcept -> std::uint64_t {
+    return context->cop0->syscall({pc}, delay_slot != 0).value;
+  }
+
   static fn read_cop0(execution_context *context, std::uint32_t slot) noexcept
       -> std::uint64_t {
-    return static_cast<std::uint64_t>(std::int64_t{
-        std::bit_cast<std::int32_t>(context->cop0->registers[slot])});
+    return static_cast<std::uint64_t>(std::int64_t{std::bit_cast<std::int32_t>(
+        static_cast<std::uint32_t>(context->cop0->registers[slot]))});
   }
 
   static fn write_cop0(execution_context *context, std::uint32_t slot,
@@ -419,6 +424,30 @@ public:
             return failure(emitted, i);
           continue;
         }
+        if (node.op == ir::opcode::syscall) {
+          uses_cop0 = true;
+          const let vector = output.newUInt64();
+          if (errors.code)
+            return failure(errors.code, i);
+          const let branch = block.branch_pc();
+          const bool delay_slot =
+              branch && block.source_pc(node) == *branch + 4;
+          const let pc = delay_slot ? *branch : block.source_pc(node);
+          asmjit::InvokeNode *call = nullptr;
+          if (const let status = output.invoke(
+                  &call, asmjit::Imm{&compiled_block::syscall},
+                  asmjit::FuncSignature::build<
+                      std::uint64_t, compiled_block::execution_context *,
+                      std::uint64_t, std::uint32_t>()))
+            return failure(status, i);
+          call->setArg(0, context);
+          call->setArg(1, asmjit::Imm{pc});
+          call->setArg(2, asmjit::Imm{delay_slot ? 1 : 0});
+          call->setRet(0, vector);
+          if (const let status = output.ret(vector))
+            return failure(status, i);
+          continue;
+        }
         if (node.op == ir::opcode::read_cop0) {
           uses_cop0 = true;
           const let result = output.newUInt64();
@@ -559,6 +588,7 @@ public:
           }
           break;
         }
+        case ir::opcode::syscall:
         case ir::opcode::read_cop0:
         case ir::opcode::write_cop0:
         case ir::opcode::write_state:

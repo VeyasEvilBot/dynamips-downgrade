@@ -798,6 +798,67 @@ fn branch_likely() -> void {
   }
 }
 
+fn syscall_exceptions() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create syscall compiler");
+  constexpr std::uint64_t pc = 0xffffffff80001000ULL;
+  for (unsigned bev = 0; bev < 2; bev++) {
+    for (unsigned scenario = 0; scenario < 4; scenario++) {
+      alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+      std::pmr::monotonic_buffer_resource arena{
+          storage.data(), storage.size(), std::pmr::null_memory_resource()};
+      const bool delay = scenario == 1;
+      const bool annulled = scenario == 2;
+      const bool nested = scenario == 3;
+      const std::array words{mips::instruction_word{delay      ? 0x10000001u
+                                                    : annulled ? 0x54220001u
+                                                               : 0x34030009u},
+                             mips::instruction_word{(0x12345u << 6) | 0x0cu},
+                             mips::instruction_word{0x34040007}};
+      let block = mips::translate(words, {pc}, arena);
+      require(block && block->info().instruction_count == 2,
+              "syscall terminates its translated block");
+      let native = compiler->compile(*block, arena);
+      require(native.has_value(), "compile syscall");
+      std::array<std::byte, mem::page_size> ram{};
+      let memory = mem::address_space::create(ram, 1);
+      require(memory.has_value(), "create syscall memory");
+      std::array<std::uint64_t, 32> state{};
+      state[1] = state[2] = 5;
+      mips::cop0_state cop0;
+      cop0.registers[12] = (bev ? 1u << 22 : 0) | (nested ? 2u : 0);
+      cop0.registers[13] = 0x80008000;
+      cop0.registers[14] = 0xffffffff81234560ULL;
+      const let result = native->run(state, **memory, &cop0);
+      require(result.has_value(), "execute syscall exception entry");
+      if (annulled) {
+        require(*result == pc + 8 &&
+                    cop0.registers[14] == 0xffffffff81234560ULL &&
+                    !(cop0.registers[12] & 2),
+                "annulled likely slot cannot raise a syscall");
+      } else {
+        require(*result ==
+                        (bev ? 0xffffffffbfc00380ULL : 0xffffffff80000180ULL) &&
+                    (cop0.registers[12] & 2) &&
+                    (cop0.registers[13] & 0x7c) == 0x20 &&
+                    (cop0.registers[13] & 0x8000) && state[4] == 0 &&
+                    cop0.registers[14] == (nested  ? 0xffffffff81234560ULL
+                                           : delay ? pc
+                                                   : pc + 4),
+                "syscall selects the vector, preserves pending IRQs and "
+                "records precise EPC");
+        require(
+            ((cop0.registers[13] >> 31) & 1) == (delay || nested ? 1u : 0u),
+            "syscall records delay slots and preserves nested EPC/BD state");
+        if (!delay)
+          require(state[3] == 9,
+                  "architectural writes before the syscall are committed");
+      }
+    }
+  }
+}
+
 fn writable_code_dispatch() -> void {
   namespace mem = jit::memory;
   std::array<std::byte, mem::page_size> ram{};
@@ -1311,6 +1372,7 @@ fn main(int argc, char **argv) -> int {
   example_program();
   branches_and_dispatch();
   branch_likely();
+  syscall_exceptions();
   writable_code_dispatch();
   handoff_boundary();
   register_call();
