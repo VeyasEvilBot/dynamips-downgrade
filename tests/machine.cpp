@@ -433,7 +433,7 @@ fn byte_memory_contract() -> bool {
 fn rom_service_queues() -> bool {
   using dynamips::devices::rom_output;
   dynamips::devices::rom_services device{
-      {0x16000000}, {{0xffffffffbe000000ULL}, {0xffffffff80008000ULL}, 8}};
+      {0x16000000}, {{0xffffffffbe000000ULL}, {0xffffffff80008000ULL}, 8, 256}};
   jit::devices::bus bus;
   if (!check(bus.add({{0x16000000}, mem::page_size}, device.descriptor())
                  .has_value(),
@@ -453,6 +453,9 @@ fn rom_service_queues() -> bool {
                  guest.load<std::uint32_t>({0x8044}) == 0xbe000000 &&
                  guest.load<std::uint32_t>({0x8028}) == 0x80008000 &&
                  guest.load<std::uint32_t>({0x802c}) == 8 &&
+                 guest.load<std::uint32_t>({0x8014}) == 256 &&
+                 guest.load<std::uint32_t, std::endian::little>({0x8014}) ==
+                     0x00010000 &&
                  guest.load<std::uint32_t, std::endian::little>({0x802c}) ==
                      0x08000000,
              "ROM identification register matches the real firmware"))
@@ -536,7 +539,11 @@ fn real_rom(const char *path) -> bool {
   using dynamips::devices::rom_output;
   dynamips::devices::rom_services services{
       {0x16000000},
-      {{0xffffffffbe000000ULL}, {ios->entry()}, ios->machine_id()}};
+      {{0xffffffffbe000000ULL},
+       {ios->entry()},
+       ios->machine_id(),
+       static_cast<std::uint32_t>(dynamips::c7200::npe400.ram_bytes /
+                                  (1024 * 1024))}};
   std::array<std::byte, 128 * 1024> nvram_bytes{};
   dynamips::devices::byte_memory nvram{{0x1e000000}, nvram_bytes};
   const std::array attachments{
