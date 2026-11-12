@@ -597,6 +597,28 @@ fn byte_memory_contract() -> bool {
 }
 
 fn rom_service_queues() -> bool {
+  dynamips::devices::rom_services geometry{{0x16000000},
+                                           {.nvram = {},
+                                            .rom_megabytes = 4,
+                                            .nvram_kibibytes = 128,
+                                            .iomem_megabytes = 0}};
+  let &sizes = *geometry.descriptor().endpoint;
+  if (!check(
+          sizes.read(
+              sizes.context,
+              {{0x16000018}, std::endian::big, mem::access_size::word}) == 4 &&
+              sizes.read(sizes.context, {{0x1600001c},
+                                         std::endian::big,
+                                         mem::access_size::word}) == 128 &&
+              sizes.read(sizes.context, {{0x16000020},
+                                         std::endian::big,
+                                         mem::access_size::word}) == 0 &&
+              sizes.read(sizes.context, {{0x1600001c},
+                                         std::endian::little,
+                                         mem::access_size::word}) == 0x80000000,
+          "ROM memory geometry uses megabytes for ROM/IOMEM and KiB for NVRAM"))
+    return false;
+
   const std::array environment{
       dynamips::devices::rommon_variable{"BOOT_TEST", "flash:image.bin"},
       dynamips::devices::rommon_variable{"EMPTY", ""}};

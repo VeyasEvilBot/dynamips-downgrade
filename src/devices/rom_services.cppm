@@ -33,6 +33,9 @@ struct rom_boot_info {
   std::uint16_t configuration_register = 0;
   // Borrowed immutable boot environment; the owner outlives the device.
   std::span<const rommon_variable> variables{};
+  std::uint32_t rom_megabytes = 0;
+  std::uint32_t nvram_kibibytes = 0;
+  std::uint32_t iomem_megabytes = 0;
 };
 
 enum class rom_output : std::uint8_t { console, log };
@@ -120,6 +123,15 @@ private:
       break;
     case 0x14:
       value = self.boot_.ram_megabytes;
+      break;
+    case 0x18:
+      value = self.boot_.rom_megabytes;
+      break;
+    case 0x1c:
+      value = self.boot_.nvram_kibibytes;
+      break;
+    case 0x20:
+      value = self.boot_.iomem_megabytes;
       break;
     case 0x24:
       value = self.boot_.configuration_register;
