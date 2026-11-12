@@ -687,6 +687,34 @@ fn word_addition() -> void {
           "constant folding agrees with word shift and addition overflow");
 }
 
+fn register_nor() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create NOR compiler");
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{
+      mips::instruction_word{0x00221827}, mips::instruction_word{0x00012027},
+      mips::instruction_word{0x3405000f}, mips::instruction_word{0x00a02827}};
+  let block = mips::translate(words, {0x1000}, arena);
+  require(block && ir::optimize(*block, ir::fold_constants).has_value(),
+          "translate and fold NOR through existing logical IR");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile NOR");
+  for (const std::uint64_t left :
+       {0ULL, 0x1234567887654321ULL, 0xffffffffffffffffULL}) {
+    for (const std::uint64_t right : {0ULL, 0xfedcba9876543210ULL}) {
+      std::array<std::uint64_t, 32> state{};
+      state[1] = left;
+      state[2] = right;
+      require(
+          native->run(state).has_value() && state[3] == ~(left | right) &&
+              state[4] == ~left && state[5] == ~std::uint64_t{15},
+          "NOR complements all 64 bits with register, zero and folded inputs");
+    }
+  }
+}
+
 fn immediate_xor() -> void {
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create XORI compiler");
@@ -1868,6 +1896,7 @@ fn main(int argc, char **argv) -> int {
   word_addition();
   variable_word_shifts();
   doubleword_shifts();
+  register_nor();
   immediate_xor();
   cop0_writes();
   cop0_full_width();

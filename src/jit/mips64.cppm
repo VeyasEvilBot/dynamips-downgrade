@@ -139,15 +139,21 @@ struct error {
     break;
   }
   constexpr std::size_t nodes_per_instruction = 4;
-  const let extra_nodes = static_cast<std::size_t>(
-      std::ranges::count_if(words, [](instruction_word word) {
-        const let op = word.bits >> 26;
-        return (op == 0 &&
-                ((word.bits & 63) == 0x21 || (word.bits & 63) == 0x23)) ||
-               op == 0x21 || op == 0x25 || op == 0x29 || op == 0x09 ||
-               op == 0x20 || op == 0x24 || op == 0x23 || op == 0x28 ||
-               op == 0x2b || op == 0x37 || op == 0x3f;
-      }));
+  const let extra_nodes =
+      static_cast<std::size_t>(std::ranges::count_if(
+          words,
+          [](instruction_word word) {
+            const let op = word.bits >> 26;
+            return (op == 0 &&
+                    ((word.bits & 63) == 0x21 || (word.bits & 63) == 0x23)) ||
+                   op == 0x21 || op == 0x25 || op == 0x29 || op == 0x09 ||
+                   op == 0x20 || op == 0x24 || op == 0x23 || op == 0x28 ||
+                   op == 0x2b || op == 0x37 || op == 0x3f;
+          })) +
+      2 * static_cast<std::size_t>(
+              std::ranges::count_if(words, [](instruction_word word) {
+                return word.bits >> 26 == 0 && (word.bits & 63) == 0x27;
+              }));
   if (extra_nodes > std::numeric_limits<std::uint32_t>::max() ||
       words.size() > (std::numeric_limits<std::uint32_t>::max() - extra_nodes) /
                          nodes_per_instruction ||
@@ -189,6 +195,7 @@ struct error {
         opcode == 0 &&
         (function == 0x38 || function == 0x3a || function == 0x3b ||
          function == 0x3c || function == 0x3e || function == 0x3f);
+    const bool nor = opcode == 0 && function == 0x27;
     const bool subu = opcode == 0 && function == 0x23;
     const bool slt = opcode == 0 && function == 0x2a;
     const bool sltu = opcode == 0 && function == 0x2b;
@@ -214,7 +221,7 @@ struct error {
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !eret &&
         !hilo_read && !hilo_write && !addu && !subu && !slt && !sltu &&
-        !variable_shift &&
+        !variable_shift && !nor &&
         !(opcode == 0 && (function == 0x24 || function == 0x25 ||
                           function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
@@ -513,7 +520,7 @@ struct error {
                           : (addiu || daddiu) ? ir::binary_kind::add_wrap
                           : immediate         ? ir::binary_kind::bit_or
                           : function == 0x24  ? ir::binary_kind::bit_and
-                          : function == 0x25  ? ir::binary_kind::bit_or
+                          : (function == 0x25 || nor) ? ir::binary_kind::bit_or
                           : function == 0x26 ? ir::binary_kind::bit_xor
                                              : ir::binary_kind::add_wrap;
     let value = result.append(
@@ -521,6 +528,15 @@ struct error {
              : ir::node::binary(operation, *left, *right, source));
     if (!value)
       return failed(value.error());
+    if (nor) {
+      const let mask = result.append(ir::node::constant(UINT64_MAX, source));
+      if (!mask)
+        return failed(mask.error());
+      value = result.append(
+          ir::node::binary(ir::binary_kind::bit_xor, *value, *mask, source));
+      if (!value)
+        return failed(value.error());
+    }
     if (addi && destination == 0)
       continue;
     if (addiu || addu || subu) {
