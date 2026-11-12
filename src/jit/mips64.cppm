@@ -180,6 +180,8 @@ struct error {
         opcode == 0 && (function == 0x11 || function == 0x13);
     const bool eret = bits == 0x42000018;
     const bool syscall = opcode == 0 && function == 0x0c;
+    const bool variable_shift =
+        opcode == 0 && (function == 4 || function == 6 || function == 7);
     const bool word_shift =
         opcode == 0 && (function == 0 || function == 2 || function == 3);
     const bool double_shift =
@@ -210,6 +212,7 @@ struct error {
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !word_shift && !double_shift && !syscall && !eret &&
         !hilo_read && !hilo_write && !addu && !subu && !slt && !sltu &&
+        !variable_shift &&
         !(opcode == 0 && (function == 0x24 || function == 0x25 ||
                           function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
@@ -318,6 +321,25 @@ struct error {
             !written)
           return failed(written.error());
       }
+      continue;
+    }
+    if (variable_shift) {
+      const let input = read(rt);
+      const let count = read(rs);
+      if (!input || !count)
+        return failed(!input ? input.error() : count.error());
+      const let operation =
+          function == 4   ? ir::binary_kind::shift_left32_variable
+          : function == 6 ? ir::binary_kind::shift_right32_variable
+                          : ir::binary_kind::shift_right_arithmetic32_variable;
+      const let value =
+          result.append(ir::node::binary(operation, *input, *count, source));
+      if (!value)
+        return failed(value.error());
+      if (let written = result.append(ir::node::write({rd}, *value, source));
+          !written)
+        return failed(written.error());
+      registers[rd] = *value;
       continue;
     }
     if (double_shift) {

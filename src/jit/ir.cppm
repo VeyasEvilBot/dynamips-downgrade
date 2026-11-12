@@ -45,6 +45,9 @@ enum class opcode : std::uint8_t {
   shift_right_arithmetic32,
   shift_right32,
   shift_left32,
+  shift_left32_variable,
+  shift_right32_variable,
+  shift_right_arithmetic32_variable,
   shift_left64,
   shift_right64,
   shift_right_arithmetic64,
@@ -79,6 +82,9 @@ constexpr fn produces_value(opcode op) noexcept -> bool {
 }
 
 enum class binary_kind : std::uint8_t {
+  shift_left32_variable,
+  shift_right32_variable,
+  shift_right_arithmetic32_variable,
   unsigned_less,
   signed_less,
   add_wrap,
@@ -223,7 +229,13 @@ struct node {
   static constexpr fn binary(binary_kind kind, value_id left, value_id right,
                               std::uint32_t source,
                               width type = width::bits64) noexcept -> node {
-    const let op = kind == binary_kind::unsigned_less   ? opcode::unsigned_less
+    const let op = kind == binary_kind::shift_left32_variable
+                       ? opcode::shift_left32_variable
+                   : kind == binary_kind::shift_right32_variable
+                       ? opcode::shift_right32_variable
+                   : kind == binary_kind::shift_right_arithmetic32_variable
+                       ? opcode::shift_right_arithmetic32_variable
+                   : kind == binary_kind::unsigned_less ? opcode::unsigned_less
                    : kind == binary_kind::signed_less   ? opcode::signed_less
                    : kind == binary_kind::subtract_wrap ? opcode::subtract_wrap
                    : kind == binary_kind::add_wrap      ? opcode::add_wrap
@@ -629,6 +641,9 @@ private:
       if (!operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::shift_left32_variable:
+    case opcode::shift_right32_variable:
+    case opcode::shift_right_arithmetic32_variable:
     case opcode::add_checked32:
     case opcode::unsigned_less:
     case opcode::signed_less:
@@ -764,6 +779,16 @@ private:
         break;
       case opcode::unsigned_less:
       case opcode::signed_less:
+      case opcode::shift_left32_variable:
+      case opcode::shift_right32_variable:
+      case opcode::shift_right_arithmetic32_variable:
+        out = std::format_to(
+            out, "  %v{} = {} %v{}, %v{}", i,
+            current.op == opcode::shift_left32_variable    ? "shl.i32.sext"
+            : current.op == opcode::shift_right32_variable ? "lshr.i32.sext"
+                                                           : "ashr.i32.sext",
+            current.data.inputs.left.index, current.data.inputs.right.index);
+        break;
       case opcode::add_checked32:
         out = std::format_to(out, "  %v{} = add.i32.checked.sext %v{}, %v{}", i,
                              current.data.inputs.left.index,
@@ -863,6 +888,27 @@ private:
             static_cast<std::uint64_t>(std::int64_t{static_cast<std::int32_t>(
                 static_cast<std::uint32_t>(input.data.immediate))});
         current = node::constant(bits, current.source_index);
+        folded++;
+      }
+      continue;
+    }
+    if (current.op == opcode::shift_left32_variable ||
+        current.op == opcode::shift_right32_variable ||
+        current.op == opcode::shift_right_arithmetic32_variable) {
+      const let &input = value.nodes()[current.data.inputs.left.index];
+      const let &count = value.nodes()[current.data.inputs.right.index];
+      if (input.op == opcode::constant && count.op == opcode::constant) {
+        const let low = static_cast<std::uint32_t>(input.data.immediate);
+        const let amount = count.data.immediate & 31;
+        const let word = current.op == opcode::shift_left32_variable
+                             ? low << amount
+                         : current.op == opcode::shift_right32_variable
+                             ? low >> amount
+                             : std::bit_cast<std::uint32_t>(
+                                   std::bit_cast<std::int32_t>(low) >> amount);
+        current = node::constant(static_cast<std::uint64_t>(std::int64_t{
+                                     std::bit_cast<std::int32_t>(word)}),
+                                 current.source_index);
         folded++;
       }
       continue;

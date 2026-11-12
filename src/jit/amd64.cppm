@@ -290,6 +290,9 @@ public:
         case ir::opcode::shift_right64:
         case ir::opcode::shift_right_arithmetic64:
         case ir::opcode::shift_right_arithmetic32:
+        case ir::opcode::shift_left32_variable:
+        case ir::opcode::shift_right32_variable:
+        case ir::opcode::shift_right_arithmetic32_variable:
         case ir::opcode::shift_left32:
         case ir::opcode::shift_right32:
         case ir::opcode::sign_extend32:
@@ -629,6 +632,24 @@ public:
         switch (node.op) {
         case ir::opcode::constant:
           break;
+        case ir::opcode::shift_left32_variable:
+        case ir::opcode::shift_right32_variable:
+        case ir::opcode::shift_right_arithmetic32_variable: {
+          const let input = operand(node.data.inputs.left);
+          const let count = operand(node.data.inputs.right);
+          if (!input || !count)
+            return failure(!input ? input.error() : count.error(), i);
+          status = output.mov(result.r32(), input->r32());
+          if (!status)
+            status = node.op == ir::opcode::shift_left32_variable
+                         ? output.shl(result.r32(), count->r8())
+                     : node.op == ir::opcode::shift_right32_variable
+                         ? output.shr(result.r32(), count->r8())
+                         : output.sar(result.r32(), count->r8());
+          if (!status)
+            status = output.movsxd(result, result.r32());
+          break;
+        }
         case ir::opcode::shift_left64:
         case ir::opcode::shift_right64:
         case ir::opcode::shift_right_arithmetic64: {

@@ -509,6 +509,64 @@ fn word_shifts() -> void {
   }
 }
 
+fn variable_word_shifts() -> void {
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create variable shift compiler");
+  for (const std::uint32_t function : {4u, 6u, 7u}) {
+    alignas(std::max_align_t) std::array<std::byte, 32768> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{0x00221800u | function},
+                           mips::instruction_word{0x00221000u | function}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block.has_value(),
+            "translate variable shifts including register overlap");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile variable shifts");
+    for (const std::uint64_t bits :
+         {0ULL, 0x80000000ULL, 0xffffffffULL, 0x1234567887654321ULL}) {
+      for (const std::uint64_t count :
+           {0ULL, 1ULL, 31ULL, 32ULL, 63ULL, 64ULL, 0xffffffffffffffffULL}) {
+        const let amount = count & 31;
+        const let low = static_cast<std::uint32_t>(bits);
+        const let word = function == 4 ? low << amount
+                         : function == 6
+                             ? low >> amount
+                             : std::bit_cast<std::uint32_t>(
+                                   std::bit_cast<std::int32_t>(low) >> amount);
+        const let expected = static_cast<std::uint64_t>(
+            std::int64_t{std::bit_cast<std::int32_t>(word)});
+        std::array<std::uint64_t, 32> state{};
+        state[1] = count;
+        state[2] = bits;
+        require(native->run(state).has_value() && state[3] == expected &&
+                    state[2] == expected,
+                "variable shifts mask counts, sign extend words and preserve "
+                "overlapping sources");
+        let folded = ir::block::create({0x1000, 1, 32}, 3, arena);
+        require(folded.has_value(), "create constant variable shift IR");
+        const let input = folded->append(ir::node::constant(bits, 0));
+        const let shift = folded->append(ir::node::constant(count, 0));
+        require(input && shift, "append variable shift constants");
+        const let value = folded->append(ir::node::binary(
+            function == 4 ? ir::binary_kind::shift_left32_variable
+            : function == 6
+                ? ir::binary_kind::shift_right32_variable
+                : ir::binary_kind::shift_right_arithmetic32_variable,
+            *input, *shift, 0));
+        require(value &&
+                    ir::optimize(*folded, ir::fold_constants).has_value() &&
+                    folded->nodes()[value->index].op == ir::opcode::constant &&
+                    folded->nodes()[value->index].data.immediate == expected,
+                "folded variable shifts agree with native execution");
+      }
+    }
+    const std::array invalid{mips::instruction_word{0x00221840u | function}};
+    require(!mips::translate(invalid, {0x1000}, arena),
+            "variable shifts reject nonzero reserved shamt fields");
+  }
+}
+
 fn doubleword_shifts() -> void {
   let compiler = amd64::compiler::create();
   require(compiler.has_value(), "create doubleword shift compiler");
@@ -1754,6 +1812,7 @@ fn main(int argc, char **argv) -> int {
   memory_operations();
   word_shifts();
   word_addition();
+  variable_word_shifts();
   doubleword_shifts();
   immediate_xor();
   cop0_writes();
