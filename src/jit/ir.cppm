@@ -37,6 +37,7 @@ struct state_slot {
 enum class width : std::uint8_t { bits32 = 32, bits64 = 64 };
 enum class opcode : std::uint8_t {
   syscall,
+  exception_return,
   constant,
   read_hilo,
   write_hilo,
@@ -68,10 +69,10 @@ enum class opcode : std::uint8_t {
 };
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
-  return op != opcode::write_hilo && op != opcode::syscall &&
-         op != opcode::write_cop0_64 && op != opcode::write_cop0 &&
-         op != opcode::write_state && op != opcode::store8 &&
-         op != opcode::store32 && op != opcode::store64;
+  return op != opcode::exception_return && op != opcode::write_hilo &&
+         op != opcode::syscall && op != opcode::write_cop0_64 &&
+         op != opcode::write_cop0 && op != opcode::write_state &&
+         op != opcode::store8 && op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t {
@@ -105,6 +106,11 @@ struct node {
   state_slot slot;
   opcode op;
   width type;
+
+  static constexpr fn exception_return(std::uint32_t source) noexcept -> node {
+    return {
+        {.immediate = 0}, source, {}, opcode::exception_return, width::bits64};
+  }
 
   static constexpr fn syscall(std::uint32_t source) noexcept -> node {
     return {{.immediate = 0}, source, {}, opcode::syscall, width::bits64};
@@ -529,6 +535,7 @@ private:
              nodes_[input.index].type == current.type;
     };
     switch (current.op) {
+    case opcode::exception_return:
     case opcode::syscall:
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
@@ -643,6 +650,9 @@ private:
       const let &current = nodes_[i];
       const let bits = static_cast<unsigned>(current.type);
       switch (current.op) {
+      case opcode::exception_return:
+        out = std::format_to(out, "  return.exception");
+        break;
       case opcode::syscall:
         out = std::format_to(out, "  raise.syscall");
         break;

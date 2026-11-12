@@ -185,6 +185,11 @@ private:
     }
   }
 
+  static fn exception_return(execution_context *context) noexcept
+      -> std::uint64_t {
+    return context->cop0->exception_return().value;
+  }
+
   static fn syscall(execution_context *context, std::uint64_t pc,
                      std::uint32_t delay_slot) noexcept -> std::uint64_t {
     return context->cop0->syscall({pc}, delay_slot != 0).value;
@@ -469,6 +474,23 @@ public:
           }
           continue;
         }
+        if (node.op == ir::opcode::exception_return) {
+          uses_cop0 = true;
+          const let target = output.newUInt64();
+          if (errors.code)
+            return failure(errors.code, i);
+          asmjit::InvokeNode *call = nullptr;
+          if (const let status = output.invoke(
+                  &call, asmjit::Imm{&compiled_block::exception_return},
+                  asmjit::FuncSignature::build<
+                      std::uint64_t, compiled_block::execution_context *>()))
+            return failure(status, i);
+          call->setArg(0, context);
+          call->setRet(0, target);
+          if (const let status = output.ret(target))
+            return failure(status, i);
+          continue;
+        }
         if (node.op == ir::opcode::syscall) {
           uses_cop0 = true;
           const let vector = output.newUInt64();
@@ -663,6 +685,7 @@ public:
         }
         case ir::opcode::read_hilo:
         case ir::opcode::write_hilo:
+        case ir::opcode::exception_return:
         case ir::opcode::syscall:
         case ir::opcode::read_cop0_64:
         case ir::opcode::write_cop0_64:

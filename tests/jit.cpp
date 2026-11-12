@@ -1025,6 +1025,52 @@ fn hilo_transfers() -> void {
   }
 }
 
+fn exception_return() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create exception return compiler");
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array words{mips::instruction_word{0x34010007},
+                             mips::instruction_word{0x42000018},
+                             mips::instruction_word{0x34010009}};
+  let block = mips::translate(words, {0x1000}, arena);
+  require(block && block->info().instruction_count == 2 &&
+              ir::optimize(*block, ir::fold_constants).has_value(),
+          "ERET ends the translated block without a delay slot");
+  let native = compiler->compile(*block, arena);
+  require(native.has_value(), "compile ERET");
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 1);
+  require(memory.has_value(), "create ERET execution memory");
+  for (const std::uint64_t level : {0ULL, 2ULL, 4ULL, 6ULL}) {
+    std::array<std::uint64_t, 32> state{};
+    const let absent = native->run(state, **memory);
+    require(!absent && absent.error().code == amd64::error_code::cop0_required,
+            "ERET rejects missing CP0 state");
+    mips::cop0_state cop0;
+    cop0.registers[12] = 0x10400001 | level;
+    cop0.registers[13] = 0x80008020;
+    cop0.registers[14] = 0xffffffff800080d4ULL;
+    cop0.registers[30] = 0xffffffff81234560ULL;
+    const let result = native->run(state, **memory, &cop0);
+    require(result && *result == cop0.registers[level & 4 ? 30 : 14] &&
+                cop0.registers[12] ==
+                    ((0x10400001 | level) & ~(level & 4 ? 4ULL : 2ULL)) &&
+                cop0.registers[13] == 0x80008020 && state[1] == 7,
+            "ERET selects full-width EPC or ErrorEPC and clears only its "
+            "exception level");
+  }
+  constexpr std::array invalid{mips::instruction_word{0x10000001},
+                               mips::instruction_word{0x42000018}};
+  const let rejected = mips::translate(invalid, {0x1000}, arena);
+  require(!rejected &&
+              rejected.error().code == mips::error_code::invalid_encoding &&
+              rejected.error().instruction_index == 1,
+          "reject ERET in a branch delay slot");
+}
+
 fn syscall_exceptions() -> void {
   namespace mem = jit::memory;
   let compiler = amd64::compiler::create();
@@ -1604,6 +1650,7 @@ fn main(int argc, char **argv) -> int {
   branches_and_dispatch();
   branch_likely();
   hilo_transfers();
+  exception_return();
   syscall_exceptions();
   writable_code_dispatch();
   handoff_boundary();
