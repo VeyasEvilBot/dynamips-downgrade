@@ -53,6 +53,8 @@ enum class opcode : std::uint8_t {
   write_state,
   write_cop0,
   read_cop0,
+  read_cop0_64,
+  write_cop0_64,
   load8_signed,
   load32_signed,
   load64,
@@ -63,8 +65,9 @@ enum class opcode : std::uint8_t {
 
 constexpr fn produces_value(opcode op) noexcept -> bool {
   return op != opcode::write_hilo && op != opcode::syscall &&
-         op != opcode::write_cop0 && op != opcode::write_state &&
-         op != opcode::store8 && op != opcode::store32 && op != opcode::store64;
+         op != opcode::write_cop0_64 && op != opcode::write_cop0 &&
+         op != opcode::write_state && op != opcode::store8 &&
+         op != opcode::store32 && op != opcode::store64;
 }
 
 enum class binary_kind : std::uint8_t {
@@ -188,6 +191,21 @@ struct node {
             source,
             slot,
             opcode::write_cop0,
+            width::bits64};
+  }
+
+  static constexpr fn read_cop0_64(state_slot slot,
+                                    std::uint32_t source) noexcept -> node {
+    return {
+        {.immediate = 0}, source, slot, opcode::read_cop0_64, width::bits64};
+  }
+
+  static constexpr fn write_cop0_64(state_slot slot, value_id value,
+                                     std::uint32_t source) noexcept -> node {
+    return {{.inputs = {value, {}}},
+            source,
+            slot,
+            opcode::write_cop0_64,
             width::bits64};
   }
 
@@ -488,15 +506,20 @@ private:
           !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
+    case opcode::read_cop0_64:
+    case opcode::write_cop0_64:
     case opcode::read_cop0:
     case opcode::write_cop0:
       if (current.slot.index != 9 && current.slot.index != 11 &&
           current.slot.index != 12 && current.slot.index != 13 &&
-          current.slot.index != 15 && current.slot.index != 16)
+          current.slot.index != 15 && current.slot.index != 16 &&
+          current.slot.index != 8 && current.slot.index != 14 &&
+          current.slot.index != 30)
         return fail(error_code::invalid_slot);
       if (current.type != width::bits64)
         return fail(error_code::invalid_type);
-      if (current.op == opcode::write_cop0 &&
+      if ((current.op == opcode::write_cop0 ||
+           current.op == opcode::write_cop0_64) &&
           !operand_valid(current.data.inputs.left))
         return fail(error_code::invalid_operand);
       break;
@@ -600,13 +623,17 @@ private:
                              current.slot.index == 0 ? "hi" : "lo",
                              current.data.inputs.left.index);
         break;
+      case opcode::read_cop0_64:
       case opcode::read_cop0:
-        out = std::format_to(out, "  %v{} = cop0.read.s32 {}", i,
+        out = std::format_to(out, "  %v{} = cop0.read.{} {}", i,
+                             current.op == opcode::read_cop0_64 ? "i64" : "s32",
                              current.slot.index);
         break;
+      case opcode::write_cop0_64:
       case opcode::write_cop0:
         out =
-            std::format_to(out, "  cop0.write.i32 %v{}, {}",
+            std::format_to(out, "  cop0.write.{} %v{}, {}",
+                           current.op == opcode::write_cop0_64 ? "i64" : "i32",
                            current.data.inputs.left.index, current.slot.index);
         break;
       case opcode::write_state:

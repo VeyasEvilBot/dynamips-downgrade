@@ -190,14 +190,13 @@ private:
     return context->cop0->syscall({pc}, delay_slot != 0).value;
   }
 
-  static fn read_cop0(execution_context *context, std::uint32_t slot) noexcept
-      -> std::uint64_t {
-    return static_cast<std::uint64_t>(std::int64_t{std::bit_cast<std::int32_t>(
-        static_cast<std::uint32_t>(context->cop0->registers[slot]))});
-  }
-
   static fn write_cop0(execution_context *context, std::uint32_t slot,
-                        std::uint64_t value) noexcept -> void {
+                        std::uint64_t value, std::uint32_t wide) noexcept
+      -> void {
+    if (wide && (slot == 14 || slot == 30)) {
+      context->cop0->registers[slot] = value;
+      return;
+    }
     context->cop0->write(static_cast<std::uint16_t>(slot),
                          static_cast<std::uint32_t>(value));
   }
@@ -490,39 +489,47 @@ public:
             return failure(status, i);
           continue;
         }
-        if (node.op == ir::opcode::read_cop0) {
+        if (node.op == ir::opcode::read_cop0 ||
+            node.op == ir::opcode::read_cop0_64) {
           uses_cop0 = true;
+          const let base = output.newUIntPtr();
           const let result = output.newUInt64();
           if (errors.code)
             return failure(errors.code, i);
-          values[i] = result;
-          asmjit::InvokeNode *call = nullptr;
-          if (const let status = output.invoke(
-                  &call, asmjit::Imm{&compiled_block::read_cop0},
-                  asmjit::FuncSignature::build<
-                      std::uint64_t, compiled_block::execution_context *,
-                      std::uint32_t>()))
+          if (const let status = output.mov(
+                  base,
+                  asmjit::x86::Mem{
+                      context,
+                      offsetof(compiled_block::execution_context, cop0), 8}))
             return failure(status, i);
-          call->setArg(0, context);
-          call->setArg(1, asmjit::Imm{node.slot.index});
-          call->setRet(0, result);
+          const bool wide = node.op == ir::opcode::read_cop0_64;
+          const asmjit::x86::Mem location{base, node.slot.index * 8,
+                                          wide ? 8u : 4u};
+          const let status = wide ? output.mov(result, location)
+                                  : output.movsxd(result, location);
+          if (status)
+            return failure(status, i);
+          values[i] = result;
           continue;
         }
-        if (node.op == ir::opcode::write_cop0) {
+        if (node.op == ir::opcode::write_cop0 ||
+            node.op == ir::opcode::write_cop0_64) {
           uses_cop0 = true;
           const let value = operand(node.data.inputs.left);
           if (!value)
             return failure(value.error(), i);
           asmjit::InvokeNode *call = nullptr;
-          if (const let status =
-                  output.invoke(&call, asmjit::Imm{&compiled_block::write_cop0},
-                                asmjit::FuncSignature::build<
-                                    void, compiled_block::execution_context *,
-                                    std::uint32_t, std::uint64_t>()))
+          if (const let status = output.invoke(
+                  &call, asmjit::Imm{&compiled_block::write_cop0},
+                  asmjit::FuncSignature::build<
+                      void, compiled_block::execution_context *, std::uint32_t,
+                      std::uint64_t, std::uint32_t>()))
             return failure(status, i);
           call->setArg(0, context);
           call->setArg(1, asmjit::Imm{node.slot.index});
           call->setArg(2, *value);
+          call->setArg(
+              3, asmjit::Imm{node.op == ir::opcode::write_cop0_64 ? 1 : 0});
           continue;
         }
         if (node.op == ir::opcode::write_state) {
@@ -633,6 +640,8 @@ public:
         case ir::opcode::read_hilo:
         case ir::opcode::write_hilo:
         case ir::opcode::syscall:
+        case ir::opcode::read_cop0_64:
+        case ir::opcode::write_cop0_64:
         case ir::opcode::read_cop0:
         case ir::opcode::write_cop0:
         case ir::opcode::write_state:

@@ -65,7 +65,7 @@ struct cop0_state {
   }
 
   fn write(std::uint16_t slot, std::uint32_t value) noexcept -> void {
-    if (slot == 15 || slot == 16)
+    if (slot == 8 || slot == 15 || slot == 16)
       return;
     registers[slot] = value;
     if (slot == 11)
@@ -166,8 +166,8 @@ struct error {
         opcode == 0 && (function == 0x11 || function == 0x13);
     const bool syscall = opcode == 0 && function == 0x0c;
     const bool word_shift = opcode == 0 && (function == 2 || function == 3);
-    const bool mfc0 = opcode == 0x10 && rs == 0;
-    const bool mtc0 = opcode == 0x10 && rs == 4;
+    const bool mfc0 = opcode == 0x10 && (rs == 0 || rs == 1);
+    const bool mtc0 = opcode == 0x10 && (rs == 4 || rs == 5);
     const bool lui = opcode == 0x0f;
     const bool sltiu = opcode == 0x0b;
     const bool slti = opcode == 0x0a;
@@ -198,7 +198,8 @@ struct error {
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((mtc0 || mfc0) &&
         ((bits & 0x7ff) != 0 ||
-         (rd != 9 && rd != 11 && rd != 12 && rd != 13 && rd != 15 && rd != 16)))
+         (rd != 9 && rd != 11 && rd != 12 && rd != 13 && rd != 15 && rd != 16 &&
+          rd != 8 && rd != 14 && rd != 30)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (indirect && (rt != 0 || (function == 8 && rd != 0) ||
                      (function == 9 && rd == rs) || ((bits >> 6) & 31) != 0))
@@ -303,7 +304,9 @@ struct error {
       continue;
     }
     if (mfc0) {
-      const let value = result.append(ir::node::read_cop0({rd}, source));
+      const let value =
+          result.append(rs == 1 ? ir::node::read_cop0_64({rd}, source)
+                                : ir::node::read_cop0({rd}, source));
       if (!value)
         return failed(value.error());
       if (let written = result.append(ir::node::write({rt}, *value, source));
@@ -316,8 +319,9 @@ struct error {
       const let value = read(rt);
       if (!value)
         return failed(value.error());
-      if (let written =
-              result.append(ir::node::write_cop0({rd}, *value, source));
+      if (let written = result.append(
+              rs == 5 ? ir::node::write_cop0_64({rd}, *value, source)
+                      : ir::node::write_cop0({rd}, *value, source));
           !written)
         return failed(written.error());
       continue;

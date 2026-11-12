@@ -545,6 +545,55 @@ fn cop0_writes() -> void {
   }
 }
 
+fn cop0_full_width() -> void {
+  namespace mem = jit::memory;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create full-width CP0 compiler");
+  for (const unsigned slot : {8u, 9u, 11u, 12u, 13u, 14u, 15u, 16u, 30u}) {
+    alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array words{mips::instruction_word{0x40220000u | (slot << 11)},
+                           mips::instruction_word{0x40030000u | (slot << 11)},
+                           mips::instruction_word{0x40a10000u | (slot << 11)},
+                           mips::instruction_word{0x40240000u | (slot << 11)},
+                           mips::instruction_word{0x40200000u | (slot << 11)}};
+    let block = mips::translate(words, {0x1000}, arena);
+    require(block.has_value(), "translate full-width CP0 transfers");
+    require(ir::optimize(*block, ir::fold_constants).has_value(),
+            "optimize full-width CP0 transfers");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile full-width CP0 transfers");
+    std::array<std::byte, mem::page_size> ram{};
+    let memory = mem::address_space::create(ram, 1);
+    require(memory.has_value(), "create full-width CP0 execution memory");
+    std::array<std::uint64_t, 32> state{};
+    state[1] = 0x1234567887654321ULL;
+    mips::cop0_state cop0;
+    cop0.registers[slot] = 0xfedcba9881234567ULL;
+    require(native->run(state, **memory, &cop0).has_value(),
+            "execute full-width CP0 transfers");
+    require(state[0] == 0 && state[2] == 0xfedcba9881234567ULL &&
+                state[3] == 0xffffffff81234567ULL,
+            "DMFC0 preserves all bits while MFC0 sign extends the low word");
+    const let expected = slot == 8 || slot == 15 || slot == 16
+                             ? 0xfedcba9881234567ULL
+                         : slot == 14 || slot == 30 ? state[1]
+                                                    : 0x87654321ULL;
+    require(
+        state[4] == expected && cop0.registers[slot] == expected,
+        "DMTC0 preserves wide exception PCs and existing register policies");
+  }
+  alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  for (const std::uint32_t invalid : {0x40254001u, 0x40a17001u, 0x40210800u}) {
+    const std::array words{mips::instruction_word{invalid}};
+    require(!mips::translate(words, {0x1000}, arena),
+            "reject unsupported CP0 select and register encodings");
+  }
+}
+
 fn byte_stores() -> void {
   namespace mem = jit::memory;
   std::array<std::byte, mem::page_size> ram{};
@@ -1407,6 +1456,7 @@ fn main(int argc, char **argv) -> int {
   memory_operations();
   word_shifts();
   cop0_writes();
+  cop0_full_width();
   byte_stores();
   signed_byte_loads();
   mmio_console();
