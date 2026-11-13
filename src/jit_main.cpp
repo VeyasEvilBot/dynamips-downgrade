@@ -47,6 +47,14 @@ fn fault_name(jit::memory::fault_reason reason) noexcept -> std::string_view {
     return "unsupported access width";
   case jit::memory::fault_reason::bus:
     return "device bus fault";
+  case jit::memory::fault_reason::tlb_miss:
+    return "TLB miss";
+  case jit::memory::fault_reason::tlb_invalid:
+    return "invalid TLB entry";
+  case jit::memory::fault_reason::tlb_modified:
+    return "TLB modification exception";
+  case jit::memory::fault_reason::address_error:
+    return "address error";
   }
   return "unknown memory fault";
 }

@@ -18,6 +18,7 @@ import jit.mips64;
 import jit.memory;
 import jit.amd64;
 import jit.interpreter;
+import jit.exceptions;
 
 export namespace jit {
 // One owner. Exact source validation permits writable code and physical
@@ -68,12 +69,22 @@ public:
         return result;
       }
       if (state.cop0.interrupt_pending()) {
-        memory_.clear_reservation();
+        memory_.invalidate();
         state.pc = state.cop0.exception(0, state.pc, false);
       }
-      if (state.pc.value % 4)
-        return std::unexpected(
-            dispatch_error{dispatch_error_code::invalid_pc, state.pc.value});
+      if (state.pc.value % 4) {
+        const let issue =
+            exceptions::from_memory({{state.pc.value},
+                                     memory::fault_reason::misaligned,
+                                     memory::access_kind::execute,
+                                     memory::access_size::word},
+                                    state.pc.value);
+        exceptions::enter(state, memory_, *issue);
+        result.instructions++;
+        state.cop0.advance_cycles(1);
+        result.reason = stop_reason::guest_exception;
+        return result;
+      }
       const let pc = state.pc.value;
       let &entry = predicted && predicted_pc == pc ? *predicted : select(pc);
       predicted = nullptr;
@@ -82,11 +93,8 @@ public:
         let compiled =
             compile(entry, pc, dump_ir,
                     std::min<std::uint64_t>(64, budget - result.instructions));
-        if (!compiled) {
-          if (compiled.error().code == dispatch_error_code::memory)
-            state.pc.value = compiled.error().pc;
-          return std::unexpected(compiled.error());
-        }
+        if (!compiled)
+          return fetch_failure(state, compiled.error(), result, budget);
         result.compiled += *compiled;
       }
       if (entry.cold && entry.hits++ >= cold_threshold_ - 1) {
@@ -125,20 +133,8 @@ public:
                            static_cast<std::uint32_t>(std::min<std::size_t>(
                                64, block_limit - result.blocks)),
                            cycle_limit);
-      if (!executed) {
-        state.cop0.advance_cycles(executed.error().completed_instructions);
-        state.pc.value = executed.error().pc;
-        return std::unexpected(dispatch_error{
-            executed.error().code == amd64::error_code::memory_fault
-                ? dispatch_error_code::memory
-                : dispatch_error_code::execution,
-            state.pc.value,
-            executed.error().access,
-            {},
-            {},
-            executed.error().branch_pc,
-            executed.error().code});
-      }
+      if (!executed)
+        return execution_failure(state, executed.error(), result);
       state.cop0.advance_cycles(executed->instructions -
                                 executed->accounted_instructions);
       state.pc.value = executed->next_pc;
@@ -157,6 +153,79 @@ public:
   }
 
 private:
+  [[gnu::cold, gnu::noinline]] fn
+  fetch_failure(mips64::state &state, const dispatch_error &error,
+                dispatch_result result, std::uint64_t budget) noexcept
+      -> std::expected<dispatch_result, dispatch_error> {
+    if (error.code == dispatch_error_code::memory) {
+      if (const let issue = exceptions::from_memory(error.access, error.pc,
+                                                    error.branch_pc)) {
+        if (error.branch_pc) {
+          if (budget - result.instructions < 2) {
+            result.reason = stop_reason::budget_exhausted;
+            return result;
+          }
+          const let branch_pc = *error.branch_pc;
+          const let branch = memory_.fetch<std::uint32_t>({branch_pc});
+          if (!branch)
+            return std::unexpected(error);
+          const std::array<mips64::instruction_word, 2> pair{{{*branch}, {0}}};
+          if (!interpreter::supports(pair))
+            return std::unexpected(
+                dispatch_error{dispatch_error_code::translation, branch_pc});
+          const let executed =
+              interpreter::execute(pair, {branch_pc}, state, memory_);
+          if (!executed)
+            return std::unexpected(error);
+          state.cop0.advance_cycles(executed->instructions -
+                                    executed->accounted_instructions);
+          result.instructions += executed->instructions;
+          result.blocks++;
+          if (executed->instructions == 1) {
+            state.pc = {executed->next_pc};
+            return result;
+          }
+        } else {
+          state.cop0.advance_cycles(1);
+          result.instructions++;
+        }
+        exceptions::enter(state, memory_, *issue);
+        result.reason = stop_reason::guest_exception;
+        return result;
+      }
+      state.pc.value = error.pc;
+    }
+    return std::unexpected(error);
+  }
+
+  [[gnu::cold, gnu::noinline]] fn
+  execution_failure(mips64::state &state, const amd64::execution_error &error,
+                    dispatch_result result) noexcept
+      -> std::expected<dispatch_result, dispatch_error> {
+    state.cop0.advance_cycles(error.completed_instructions);
+    if (error.code == amd64::error_code::memory_fault)
+      if (const let issue = exceptions::from_memory(error.access, error.pc,
+                                                    error.branch_pc)) {
+        exceptions::enter(state, memory_, *issue);
+        state.cop0.advance_cycles(1);
+        result.instructions += error.instructions + 1;
+        result.blocks += error.blocks;
+        result.reason = stop_reason::guest_exception;
+        return result;
+      }
+    state.pc.value = error.pc;
+    return std::unexpected(
+        dispatch_error{error.code == amd64::error_code::memory_fault
+                           ? dispatch_error_code::memory
+                           : dispatch_error_code::execution,
+                       state.pc.value,
+                       error.access,
+                       {},
+                       {},
+                       error.branch_pc,
+                       error.code});
+  }
+
   struct cached_block {
     std::optional<amd64::compiled_block> code;
     std::uint64_t pc = 0;
@@ -209,7 +278,7 @@ private:
               ? amd64::error_code::memory_fault
               : amd64::error_code::invalid_state,
           result.error().pc, result.error().access, result.error().branch_pc,
-          result.error().completed_instructions});
+          result.error().completed_instructions, result.error().instructions});
     return amd64::execution_result{result->next_pc, result->instructions,
                                    amd64::exit_reason::completed, 1,
                                    result->accounted_instructions};

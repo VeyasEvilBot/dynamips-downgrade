@@ -46,7 +46,11 @@ enum class fault_reason : std::uint8_t {
   unmapped,
   permission,
   unsupported_size,
-  bus
+  bus,
+  tlb_miss,
+  tlb_invalid,
+  tlb_modified,
+  address_error
 };
 
 struct fault {
@@ -468,6 +472,25 @@ public:
     encode<T, Order>(*host, value);
     written(*host, sizeof(T));
     return true;
+  }
+
+  // DMA/debugger/restore writes share CPU coherency and reservation tracking.
+  [[nodiscard]] fn write_physical(physical_address address,
+                                   std::span<const std::byte> bytes) noexcept
+      -> std::expected<void, fault> {
+    if (address.value > ram_.size() ||
+        bytes.size() > ram_.size() - address.value)
+      return std::unexpected(fault{{address.value},
+                                   fault_reason::bus,
+                                   access_kind::write,
+                                   access_size::byte});
+    if (bytes.empty())
+      return {};
+    clear_reservation();
+    let *host = ram_.data() + address.value;
+    std::memmove(host, bytes.data(), bytes.size());
+    written(host, bytes.size());
+    return {};
   }
 
   // A single-page byte write. Device partial writes need an explicit bus

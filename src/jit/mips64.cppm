@@ -105,8 +105,19 @@ struct cop0_state {
       value &= 0x01ffe000;
     else if (slot == 2 || slot == 3)
       value &= 0x7fffffff;
-    else if (slot == 10)
-      value &= 0xffffe0ff;
+    else if (slot == 10) {
+      registers[slot] = static_cast<std::uint64_t>(
+                            std::int64_t{std::bit_cast<std::int32_t>(value)}) &
+                        0xc00000ffffffe0ffULL;
+      return;
+    } else if (slot == 4 || slot == 20) {
+      const std::uint64_t preserve = slot == 4 ? 0x7fffffULL : 0x1ffffffffULL;
+      registers[slot] = (registers[slot] & preserve) |
+                        (static_cast<std::uint64_t>(
+                             std::int64_t{std::bit_cast<std::int32_t>(value)}) &
+                         ~preserve);
+      return;
+    }
     registers[slot] = value;
     if (slot == 11)
       registers[13] &= ~(1u << 15);
@@ -367,7 +378,8 @@ struct error {
         ((bits & 0x7ff) != 0 ||
          (rd != 9 && rd != 11 && rd != 12 && rd != 13 && rd != 15 && rd != 16 &&
           rd != 7 && rd != 8 && rd != 14 && rd != 30 && rd != 0 && rd != 2 &&
-          rd != 3 && rd != 5 && rd != 6 && rd != 10 && rd != 28 && rd != 29)))
+          rd != 3 && rd != 4 && rd != 20 && rd != 5 && rd != 6 && rd != 10 &&
+          rd != 28 && rd != 29)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (indirect && (rt != 0 || (function == 8 && rd != 0) ||
                      (function == 9 && rd == rs) || ((bits >> 6) & 31) != 0))

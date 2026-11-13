@@ -54,6 +54,8 @@ struct execution_error {
   memory::fault access{};
   std::optional<std::uint64_t> branch_pc{};
   std::uint32_t completed_instructions = 0;
+  std::uint32_t instructions = 0;
+  std::uint32_t blocks = 1;
 };
 
 [[nodiscard]] fn message(error value) noexcept -> std::string_view {
@@ -206,7 +208,10 @@ public:
                                                           : std::nullopt,
           context.instruction_base +
               static_cast<std::uint32_t>((pc - region.pc) / 4) -
-              context.accounted});
+              context.accounted,
+          context.instruction_base +
+              static_cast<std::uint32_t>((pc - region.pc) / 4),
+          regions_.empty() ? 1u : context.executed_blocks});
     return execution_result{
         pc,
         context.trap_pc ? context.instruction_base +
@@ -425,13 +430,15 @@ private:
 
   static fn exception_return(execution_context *context) noexcept
       -> std::uint64_t {
-    context->memory->clear_reservation();
+    context->memory->invalidate();
     return context->cop0->exception_return().value;
   }
 
   static fn overflow(execution_context *context, std::uint64_t pc,
                       std::uint32_t delay_slot) noexcept -> std::uint64_t {
     context->memory->clear_reservation();
+    if (!(context->cop0->registers[12] & 2))
+      context->memory->invalidate();
     context->trap_pc = pc + (delay_slot ? 4 : 0);
     return context->cop0->exception(12, {pc}, delay_slot != 0).value;
   }
@@ -439,6 +446,8 @@ private:
   static fn syscall(execution_context *context, std::uint64_t pc,
                      std::uint32_t delay_slot) noexcept -> std::uint64_t {
     context->memory->clear_reservation();
+    if (!(context->cop0->registers[12] & 2))
+      context->memory->invalidate();
     context->trap_pc = pc + (delay_slot ? 4 : 0);
     return context->cop0->exception(8, {pc}, delay_slot != 0).value;
   }
@@ -447,15 +456,21 @@ private:
                         std::uint64_t value, std::uint32_t wide) noexcept
       -> void {
     account_before_external(context);
+    const let old_status = context->cop0->registers[12];
     const let old_asid = context->cop0->registers[10] & 255;
-    if (wide && (slot == 10 || slot == 14 || slot == 30))
+    if (wide && (slot == 4 || slot == 20)) {
+      const std::uint64_t preserve = slot == 4 ? 0x7fffffULL : 0x1ffffffffULL;
+      context->cop0->registers[slot] =
+          (context->cop0->registers[slot] & preserve) | (value & ~preserve);
+    } else if (wide && (slot == 10 || slot == 14 || slot == 30))
       context->cop0->registers[slot] =
           slot == 10 ? value & 0xc00000ffffffe0ffULL : value;
     else
       context->cop0->write(static_cast<std::uint16_t>(slot),
                            static_cast<std::uint32_t>(value));
-    if (context->memory && slot == 10 &&
-        old_asid != (context->cop0->registers[10] & 255))
+    if (context->memory &&
+        ((slot == 10 && old_asid != (context->cop0->registers[10] & 255)) ||
+         (slot == 12 && ((old_status ^ context->cop0->registers[12]) & 0xfe))))
       context->memory->invalidate();
   }
 

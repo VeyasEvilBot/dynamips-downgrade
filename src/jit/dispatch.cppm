@@ -22,6 +22,7 @@ import jit.ir;
 import jit.mips64;
 import jit.amd64;
 import jit.memory;
+import jit.exceptions;
 
 export namespace jit {
 enum class dispatch_error_code {
@@ -276,8 +277,11 @@ public:
         return result;
       }
       if (state.cop0.interrupt_pending()) {
-        memory_.clear_reservation();
+        memory_.invalidate();
         state.pc = state.cop0.exception(0, state.pc, false);
+        if (state.pc.value < start_.value || state.pc.value >= end)
+          return std::unexpected(
+              dispatch_error{dispatch_error_code::invalid_pc, state.pc.value});
       }
       if (generation_ != memory_.mapping_generation()) {
         for (let &entry : cache_)
@@ -304,6 +308,17 @@ public:
           state.registers, memory_, &state.cop0, &state.hilo, &state.cop1);
       if (!executed) {
         state.cop0.advance_cycles(executed.error().completed_instructions);
+        if (executed.error().code == amd64::error_code::memory_fault)
+          if (const let issue = exceptions::from_memory(
+                  executed.error().access, executed.error().pc,
+                  executed.error().branch_pc)) {
+            exceptions::enter(state, memory_, *issue);
+            state.cop0.advance_cycles(1);
+            result.instructions += executed.error().instructions + 1;
+            result.blocks += executed.error().blocks;
+            result.reason = stop_reason::guest_exception;
+            return result;
+          }
         state.pc.value = executed.error().pc;
         return std::unexpected(dispatch_error{
             executed.error().code == amd64::error_code::memory_fault

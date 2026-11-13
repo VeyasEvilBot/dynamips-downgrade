@@ -30,6 +30,7 @@ struct failure {
   std::optional<std::uint64_t> branch_pc{};
   std::uint32_t completed_instructions = 0;
   error_code code = error_code::memory;
+  std::uint32_t instructions = 0;
 };
 
 namespace detail {
@@ -519,7 +520,8 @@ execute(std::span<const mips64::instruction_word> words,
     }
     if (fault)
       return std::unexpected(failure{*fault, pc, branch_pc,
-                                     progress.completed - progress.accounted});
+                                     progress.completed - progress.accounted,
+                                     error_code::memory, progress.completed});
     progress.completed++;
     if (writes.modified && !branch_pc)
       return result{pc + 4, progress.completed, progress.accounted};
