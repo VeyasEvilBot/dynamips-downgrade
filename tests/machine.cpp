@@ -993,7 +993,8 @@ fn real_rom(const char *path) -> bool {
                            });
         output_ok = output_ok && drained.has_value();
       }
-      if (!result || result->reason != jit::stop_reason::yielded)
+      if (!result || (result->reason != jit::stop_reason::yielded &&
+                      result->reason != jit::stop_reason::guest_exception))
         return result;
       instructions += result->instructions;
     }
@@ -1054,7 +1055,8 @@ fn real_rom(const char *path) -> bool {
     if (!check(running.has_value(), "execute the ROM and loaded RAM entry"))
       return false;
     remaining -= running->instructions;
-    if (running->reason != jit::stop_reason::yielded)
+    if (running->reason != jit::stop_reason::yielded &&
+        running->reason != jit::stop_reason::guest_exception)
       return check(
           running->reason == jit::stop_reason::budget_exhausted &&
               (*board)->cpu().registers[20] == 0xc0de &&

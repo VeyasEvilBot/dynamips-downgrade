@@ -98,6 +98,36 @@ enum class opcode : std::uint8_t {
   store64,
 };
 
+// Only pure operations may cross a fault or observable state boundary.
+// Loads include possible MMIO; conservatively treat every other operation as
+// a barrier until its architectural effects are explicitly classified.
+constexpr fn is_pure(opcode op) noexcept -> bool {
+  switch (op) {
+  case opcode::alias:
+  case opcode::constant:
+  case opcode::shift_left64:
+  case opcode::shift_right64:
+  case opcode::shift_right_arithmetic64:
+  case opcode::shift_right_arithmetic32:
+  case opcode::shift_left32_variable:
+  case opcode::shift_right32_variable:
+  case opcode::shift_right_arithmetic32_variable:
+  case opcode::shift_left32:
+  case opcode::shift_right32:
+  case opcode::sign_extend32:
+  case opcode::unsigned_less:
+  case opcode::signed_less:
+  case opcode::subtract_wrap:
+  case opcode::add_wrap:
+  case opcode::bit_and:
+  case opcode::bit_or:
+  case opcode::bit_xor:
+    return true;
+  default:
+    return false;
+  }
+}
+
 constexpr fn produces_value(opcode op) noexcept -> bool {
   return op != opcode::tlb_operation && op != opcode::memory_barrier &&
          op != opcode::cache_index && op != opcode::multiply_unsigned32 &&

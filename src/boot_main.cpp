@@ -218,7 +218,8 @@ fn run(const char *rom_path, const char *ios_path,
     }
     if (budget)
       executed += result->instructions;
-    if (result->reason == jit::stop_reason::yielded)
+    if (result->reason == jit::stop_reason::yielded ||
+        result->reason == jit::stop_reason::guest_exception)
       continue;
     if (result->reason == jit::stop_reason::handoff ||
         result->reason == jit::stop_reason::completed)

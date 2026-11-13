@@ -1150,42 +1150,57 @@ fn branch_likely() -> void {
   require(compiler.has_value(), "create likely branch compiler");
   for (unsigned opcode : {0x14u, 0x15u}) {
     for (unsigned different = 0; different < 2; different++) {
-      for (unsigned slot = 0; slot < 3; slot++) {
-        alignas(std::max_align_t) std::array<std::byte, 8192> storage;
-        std::pmr::monotonic_buffer_resource arena{
-            storage.data(), storage.size(), std::pmr::null_memory_resource()};
-        const std::array words{
-            mips::instruction_word{0x34030009},
-            mips::instruction_word{(opcode << 26) | 0x00220003u},
-            mips::instruction_word{slot == 0 ? 0x34030007u
-                                   : slot == 1 ? 0xdc830000u
-                                               : 0x34010007u}};
-        let block = mips::translate(words, {0x1000}, arena);
-        require(block && block->branch()->annul_not_taken,
-                "translate likely branch");
-        require(ir::optimize(*block, ir::fold_constants).has_value(),
-                "optimize likely branch");
-        let native = compiler->compile(*block, arena);
-        require(native.has_value(), "compile likely branch");
-        std::array<std::byte, mem::page_size> ram{};
-        let memory = mem::address_space::create(ram, 1);
-        require(memory.has_value(), "create likely branch memory");
-        std::array<std::uint64_t, 32> state{};
-        state[1] = 5;
-        state[2] = 5 + different;
-        state[4] = 0x9000;
-        const let result = native->run(state, **memory);
-        const bool taken = opcode == 0x14 ? different == 0 : different != 0;
-        if (slot == 1 && taken)
-          require(!result && result.error().pc == 0x1008 &&
-                      result.error().branch_pc == 0x1004 && state[3] == 9,
-                  "taken likely slot faults with precise state");
-        else
-          require(result && *result == (taken ? 0x1014u : 0x100cu) &&
-                      state[3] == (slot == 0 && taken ? 7u : 9u) &&
-                      state[1] == (slot == 2 && taken ? 7u : 5u),
-                  "likely branch annuls register writes and faults only when "
-                  "not taken");
+      for (unsigned slot = 0; slot < 4; slot++) {
+        for (unsigned immediate : {1u, 3u}) {
+          alignas(std::max_align_t) std::array<std::byte, 8192> storage;
+          std::pmr::monotonic_buffer_resource arena{
+              storage.data(), storage.size(), std::pmr::null_memory_resource()};
+          const std::array words{
+              mips::instruction_word{0x34030009},
+              mips::instruction_word{(opcode << 26) | 0x00220000u | immediate},
+              mips::instruction_word{slot == 0   ? 0x34030007u
+                                     : slot == 1 ? 0xdc830000u
+                                     : slot == 2 ? 0x34010007u
+                                                 : 0u}};
+          let block = mips::translate(words, {0x1000}, arena);
+          require(block && block->branch()->annul_not_taken,
+                  "translate likely branch");
+          require(ir::optimize(*block, ir::fold_constants).has_value(),
+                  "optimize likely branch");
+          let native = compiler->compile(*block, arena);
+          require(native.has_value(), "compile likely branch");
+          std::array<std::byte, mem::page_size> ram{};
+          let memory = mem::address_space::create(ram, 1);
+          require(memory.has_value(), "create likely branch memory");
+          std::array<std::uint64_t, 32> state{};
+          state[1] = 5;
+          state[2] = 5 + different;
+          state[4] = 0x9000;
+          const let initial = state;
+          const let result = native->execute(state, **memory);
+          const bool taken = opcode == 0x14 ? different == 0 : different != 0;
+          if (slot == 1 && taken)
+            require(!result && result.error().pc == 0x1008 &&
+                        result.error().branch_pc == 0x1004 && state[3] == 9,
+                    "taken likely slot faults with precise state");
+          else
+            require(result &&
+                        result->next_pc ==
+                            (taken ? 0x1008u + immediate * 4 : 0x100cu) &&
+                        result->instructions == (taken ? 3u : 2u) &&
+                        state[3] == (slot == 0 && taken ? 7u : 9u) &&
+                        state[1] == (slot == 2 && taken ? 7u : 5u),
+                    "likely branch annuls register writes and faults only when "
+                    "not taken");
+          if (slot != 1) {
+            let compatibility_state = initial;
+            const let compatibility = native->run(compatibility_state);
+            require(compatibility && *compatibility == result->next_pc &&
+                        compatibility_state == state,
+                    "register-only likely branches support a null execution "
+                    "context");
+          }
+        }
       }
     }
   }
@@ -2114,10 +2129,19 @@ fn checked_addition() -> void {
           state[2] = 99;
           mips::cop0_state cop0;
           cop0.registers[13] = 0x8000;
-          const let result = native->run(state, **memory, &cop0);
-          require(result && *result == (overflow ? 0xffffffff80000180ULL
-                                                 : block->next_pc()),
+          const let result = native->execute(state, **memory, &cop0);
+          require(result && result->next_pc == (overflow ? 0xffffffff80000180ULL
+                                                         : block->next_pc()),
                   "ADDI returns an overflow vector or the ordinary next PC");
+          require(result->reason == (overflow
+                                         ? amd64::exit_reason::guest_exception
+                                         : amd64::exit_reason::completed) &&
+                      result->instructions ==
+                          (overflow ? (slot == 1 ? 3u : 2u)
+                                    : block->info().instruction_count -
+                                          (slot == 2 ? 1u : 0u)),
+                  "native outcome counts the precise prefix, including "
+                  "delay-slot traps");
           require(state[0] == 0 &&
                       state[2] == (overflow || slot == 2 || destination == 0
                                        ? 99ULL
@@ -2255,6 +2279,37 @@ fn writable_code_dispatch() -> void {
   require(memory && (*memory)->map_ram({0x1000}, {0}, rwx).has_value() &&
               (*memory)->map_ram({0x3000}, {0}, rwx).has_value(),
           "map writable code aliases");
+  require(
+      (*memory)->store<std::uint32_t>({0x1080}, 0x34040001).has_value() &&
+          (*memory)->store<std::uint32_t>({0x1084}, 0x20850001).has_value() &&
+          (*memory)->store<std::uint32_t>({0x1088}, 0x34060009).has_value() &&
+          (*memory)->store<std::uint32_t>({0x108c}, 0x70000000).has_value(),
+      "install bounded execution program");
+  let bounded = jit::memory_dispatcher::create(**memory);
+  require(bounded.has_value(), "create bounded dispatcher");
+  mips::state precise{};
+  precise.pc = {0x1080};
+  const let warm = (*bounded)->run_slice(precise, 3, 1);
+  require(warm && warm->instructions == 3, "warm a larger cached block");
+  precise = {};
+  precise.pc = {0x1080};
+  const let tiny = (*bounded)->run_slice(precise, 1);
+  require(tiny && tiny->instructions == 1 && precise.pc.value == 0x1084 &&
+              precise.registers[4] == 1,
+          "small budgets execute a prefix rather than stall");
+  precise.pc = {0x1080};
+  require((*memory)->store<std::uint32_t>({0x1084}, 0x20e50001).has_value(),
+          "install overflowing ADDI");
+  precise.registers[7] = 0x7fffffff;
+  bounded = jit::memory_dispatcher::create(**memory);
+  require(bounded.has_value(), "create full block trap dispatcher");
+  const let trapped = (*bounded)->run_slice(precise, 10, 1);
+  require(trapped && trapped->reason == jit::stop_reason::guest_exception &&
+              trapped->instructions == 2 &&
+              precise.pc.value == 0xffffffff80000180ULL &&
+              precise.cop0.registers[9] == 1 && precise.cop0.half_cycle &&
+              precise.registers[6] == 0,
+          "overflow charges the executed prefix including the trapping slot");
   constexpr std::array words{0x34011020u, 0x3c023403u, 0x34420007u, 0xac220000u,
                              0x08000408u, 0u,          0x70000000u, 0u,
                              0x34030001u, 0x70000000u};
@@ -2285,6 +2340,11 @@ fn writable_code_dispatch() -> void {
   const let cached = (*dispatch)->run_slice(state, 1);
   require(cached && cached->compiled == 0 && state.registers[3] == 9,
           "unchanged code reuses its native block");
+  (*memory)->invalidate();
+  state.pc = {0x1020};
+  const let revalidated = (*dispatch)->run_slice(state, 1);
+  require(revalidated && revalidated->compiled == 0 && state.registers[3] == 9,
+          "translation invalidation revalidates backing without recompilation");
   constexpr std::array maintenance{0xbd210001u, 0xbd200000u, 0x08000408u, 0u};
   for (std::size_t i = 0; i < maintenance.size(); i++)
     require((*memory)

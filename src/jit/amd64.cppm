@@ -85,6 +85,14 @@ struct execution_error {
   return "native compilation failed";
 }
 
+enum class exit_reason { completed, guest_exception };
+
+struct execution_result {
+  std::uint64_t next_pc;
+  std::uint32_t instructions;
+  exit_reason reason;
+};
+
 class compiler;
 
 class compiled_block {
@@ -97,7 +105,8 @@ public:
         entry_(std::exchange(other.entry_, nullptr)), slots_(other.slots_),
         uses_memory_(other.uses_memory_), uses_cop0_(other.uses_cop0_),
         uses_hilo_(other.uses_hilo_), uses_cop1_(other.uses_cop1_),
-        branch_pc_(other.branch_pc_) {}
+        branch_pc_(other.branch_pc_), start_pc_(other.start_pc_),
+        instructions_(other.instructions_) {}
 
   fn operator=(compiled_block &&other) noexcept -> compiled_block & {
     if (this != &other) {
@@ -110,6 +119,8 @@ public:
       uses_hilo_ = other.uses_hilo_;
       uses_cop1_ = other.uses_cop1_;
       branch_pc_ = other.branch_pc_;
+      start_pc_ = other.start_pc_;
+      instructions_ = other.instructions_;
     }
     return *this;
   }
@@ -133,11 +144,12 @@ public:
     return entry_(state.data(), nullptr);
   }
 
-  [[nodiscard]] fn
-  run(std::span<std::uint64_t> state, memory::address_space &memory,
-      mips64::cop0_state *cop0 = nullptr, mips64::hilo_state *hilo = nullptr,
-      mips64::cop1_state *cop1 = nullptr) const noexcept
-      -> std::expected<std::uint64_t, execution_error> {
+  [[nodiscard]] fn execute(std::span<std::uint64_t> state,
+                            memory::address_space &memory,
+                            mips64::cop0_state *cop0 = nullptr,
+                            mips64::hilo_state *hilo = nullptr,
+                            mips64::cop1_state *cop1 = nullptr) const noexcept
+      -> std::expected<execution_result, execution_error> {
     if (!entry_)
       return std::unexpected(execution_error{error_code::unavailable, 0});
     if (state.size() < slots_)
@@ -154,7 +166,24 @@ public:
       return std::unexpected(execution_error{
           context.issue, pc, context.fault,
           branch_pc_ && pc == *branch_pc_ + 4 ? branch_pc_ : std::nullopt});
-    return pc;
+    return execution_result{
+        pc,
+        context.trap_pc
+            ? static_cast<std::uint32_t>((*context.trap_pc - start_pc_) / 4 + 1)
+            : instructions_ - (context.annulled_slot ? 1u : 0u),
+        context.trap_pc ? exit_reason::guest_exception
+                        : exit_reason::completed};
+  }
+
+  [[nodiscard]] fn
+  run(std::span<std::uint64_t> state, memory::address_space &memory,
+      mips64::cop0_state *cop0 = nullptr, mips64::hilo_state *hilo = nullptr,
+      mips64::cop1_state *cop1 = nullptr) const noexcept
+      -> std::expected<std::uint64_t, execution_error> {
+    const let result = execute(state, memory, cop0, hilo, cop1);
+    if (!result)
+      return std::unexpected(result.error());
+    return result->next_pc;
   }
 
 private:
@@ -165,7 +194,9 @@ private:
     mips64::cop0_state *cop0;
     mips64::hilo_state *hilo;
     mips64::cop1_state *cop1;
+    std::optional<std::uint64_t> trap_pc{};
     memory::fault fault{};
+    bool annulled_slot = false;
     bool failed = false;
     error_code issue = error_code::memory_fault;
   };
@@ -339,12 +370,14 @@ private:
   static fn overflow(execution_context *context, std::uint64_t pc,
                       std::uint32_t delay_slot) noexcept -> std::uint64_t {
     context->memory->clear_reservation();
+    context->trap_pc = pc + (delay_slot ? 4 : 0);
     return context->cop0->exception(12, {pc}, delay_slot != 0).value;
   }
 
   static fn syscall(execution_context *context, std::uint64_t pc,
                      std::uint32_t delay_slot) noexcept -> std::uint64_t {
     context->memory->clear_reservation();
+    context->trap_pc = pc + (delay_slot ? 4 : 0);
     return context->cop0->exception(8, {pc}, delay_slot != 0).value;
   }
 
@@ -366,10 +399,12 @@ private:
   compiled_block(std::shared_ptr<asmjit::JitRuntime> runtime, entry_point entry,
                  std::uint16_t slots, bool uses_memory, bool uses_cop0,
                  bool uses_hilo, bool uses_cop1,
-                 std::optional<std::uint64_t> branch_pc) noexcept
+                 std::optional<std::uint64_t> branch_pc, std::uint64_t start_pc,
+                 std::uint32_t instructions) noexcept
       : runtime_(std::move(runtime)), entry_(entry), slots_(slots),
         uses_memory_(uses_memory), uses_cop0_(uses_cop0), uses_hilo_(uses_hilo),
-        uses_cop1_(uses_cop1), branch_pc_(branch_pc) {}
+        uses_cop1_(uses_cop1), branch_pc_(branch_pc), start_pc_(start_pc),
+        instructions_(instructions) {}
 
   std::shared_ptr<asmjit::JitRuntime> runtime_;
   entry_point entry_;
@@ -379,6 +414,8 @@ private:
   bool uses_hilo_;
   bool uses_cop1_;
   std::optional<std::uint64_t> branch_pc_;
+  std::uint64_t start_pc_;
+  std::uint32_t instructions_;
 
   fn reset() noexcept -> void {
     // Only this owner can release the installed entry point.
@@ -438,29 +475,9 @@ public:
           keep_store[i - 1] = observed[node.slot.index];
           observed[node.slot.index] = 0;
           break;
-        case ir::opcode::alias:
-        case ir::opcode::constant:
-        case ir::opcode::shift_left64:
-        case ir::opcode::shift_right64:
-        case ir::opcode::shift_right_arithmetic64:
-        case ir::opcode::shift_right_arithmetic32:
-        case ir::opcode::shift_left32_variable:
-        case ir::opcode::shift_right32_variable:
-        case ir::opcode::shift_right_arithmetic32_variable:
-        case ir::opcode::shift_left32:
-        case ir::opcode::shift_right32:
-        case ir::opcode::sign_extend32:
-        case ir::opcode::unsigned_less:
-        case ir::opcode::signed_less:
-        case ir::opcode::subtract_wrap:
-        case ir::opcode::add_wrap:
-        case ir::opcode::bit_and:
-        case ir::opcode::bit_or:
-        case ir::opcode::bit_xor:
-          break;
         default:
-          // Unclassified effects must observe all preceding state writes.
-          std::ranges::fill(observed, 1);
+          if (!ir::is_pure(node.op))
+            std::ranges::fill(observed, 1);
           break;
         }
       }
@@ -1155,6 +1172,7 @@ public:
           return failure(!left ? left.error() : right.error(),
                          block.nodes().size());
         const let skip = output.newLabel();
+        const let done = output.newLabel();
         if (errors.code)
           return failure(errors.code, block.nodes().size());
         if (const let status = output.cmp(*left, *right))
@@ -1165,8 +1183,28 @@ public:
           return failure(status, block.nodes().size());
         if (const let status = output.mov(next_pc, asmjit::Imm{branch.target}))
           return failure(status, block.nodes().size());
+        if (likely)
+          if (const let status = output.jmp(done))
+            return failure(status, block.nodes().size());
         if (const let status = output.bind(skip))
           return failure(status, block.nodes().size());
+        if (likely) {
+          // PC alone cannot distinguish an annulled slot when target equals
+          // fallthrough. The register-only compatibility entry has no context.
+          if (const let status = output.test(context, context))
+            return failure(status, block.nodes().size());
+          if (const let status = output.je(done))
+            return failure(status, block.nodes().size());
+          if (const let status = output.mov(
+                  asmjit::x86::Mem{context,
+                                   offsetof(compiled_block::execution_context,
+                                            annulled_slot),
+                                   1},
+                  1))
+            return failure(status, block.nodes().size());
+          if (const let status = output.bind(done))
+            return failure(status, block.nodes().size());
+        }
       }
       if (const let *jump = block.jump())
         if (const let status = output.mov(next_pc, asmjit::Imm{jump->target}))
@@ -1194,7 +1232,9 @@ public:
                             uses_cop0,
                             uses_hilo,
                             uses_cop1,
-                            block.branch_pc()};
+                            block.branch_pc(),
+                            block.info().start_pc,
+                            block.info().instruction_count};
     } catch (const std::bad_alloc &) {
       return std::unexpected(error{error_code::out_of_memory});
     }

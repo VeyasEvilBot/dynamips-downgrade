@@ -46,7 +46,13 @@ struct dispatch_error {
   std::optional<std::uint64_t> branch_pc{};
   amd64::error_code execution = amd64::error_code::memory_fault;
 };
-enum class stop_reason { completed, budget_exhausted, yielded, handoff };
+enum class stop_reason {
+  completed,
+  budget_exhausted,
+  yielded,
+  handoff,
+  guest_exception
+};
 
 struct dispatch_result {
   stop_reason reason;
@@ -193,7 +199,7 @@ public:
         result.reason = stop_reason::budget_exhausted;
         return result;
       }
-      const let executed = entry.code->run(
+      const let executed = entry.code->execute(
           state.registers, memory_, &state.cop0, &state.hilo, &state.cop1);
       if (!executed) {
         state.pc.value = executed.error().pc;
@@ -208,10 +214,14 @@ public:
             executed.error().branch_pc,
             executed.error().code});
       }
-      state.cop0.advance_cycles(entry.instructions);
-      state.pc.value = *executed;
-      result.instructions += entry.instructions;
+      state.cop0.advance_cycles(executed->instructions);
+      state.pc.value = executed->next_pc;
+      result.instructions += executed->instructions;
       result.blocks++;
+      if (executed->reason == amd64::exit_reason::guest_exception) {
+        result.reason = stop_reason::guest_exception;
+        return result;
+      }
     }
   }
 
