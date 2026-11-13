@@ -2270,6 +2270,59 @@ fn syscall_exceptions() -> void {
   }
 }
 
+fn conflicting_code_blocks() -> void {
+  namespace mem = jit::memory;
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 5);
+  constexpr let rwx =
+      mem::permission::read | mem::permission::write | mem::permission::execute;
+  // Distinct PCs that collided in the direct-mapped native cache.
+  constexpr std::array<std::uint64_t, 5> pcs{0x1000, 0x5004, 0x9008, 0xd00c,
+                                             0x11010};
+  require(memory.has_value(), "create conflicting code memory");
+  for (std::size_t i = 0; i < pcs.size(); i++) {
+    require(
+        (*memory)
+                ->map_ram({pcs[i] & ~std::uint64_t{mem::page_size - 1}}, {0},
+                          rwx)
+                .has_value() &&
+            (*memory)
+                ->store<std::uint32_t>(
+                    {pcs[i]}, 0x34010000u | static_cast<std::uint32_t>(i + 1))
+                .has_value(),
+        "map and populate conflicting executable aliases");
+  }
+  let dispatch = jit::memory_dispatcher::create(**memory);
+  require(dispatch.has_value(), "create conflicting code dispatcher");
+  mips::state state{};
+  for (unsigned pass = 0; pass < 3; pass++)
+    for (std::size_t i = 0; i < 4; i++) {
+      state.pc = {pcs[i]};
+      const let result = (*dispatch)->run_slice(state, 1);
+      require(result && result->compiled == (pass == 0 ? 1u : 0u) &&
+                  state.registers[1] == i + 1,
+              "colliding hot blocks coexist and reuse their native code");
+    }
+  state.pc = {pcs[4]};
+  const let overflow = (*dispatch)->run_slice(state, 1);
+  require(overflow && overflow->compiled == 1 && state.registers[1] == 5,
+          "full cache set replaces a block and executes the new code");
+  state.pc = {pcs[0]};
+  const let replaced = (*dispatch)->run_slice(state, 1);
+  require(replaced && replaced->compiled == 1 && state.registers[1] == 1,
+          "evicted code recompiles safely");
+  require((*memory)->store<std::uint32_t>({0x1008}, 0x34010009).has_value(),
+          "modify retained code through another physical alias");
+  state.pc = {pcs[2]};
+  const let changed = (*dispatch)->run_slice(state, 1);
+  require(changed && changed->compiled == 1 && state.registers[1] == 9,
+          "associative lookup still validates modified instruction bytes");
+  state.pc = {pcs[3]};
+  const let neighbor = (*dispatch)->run_slice(state, 1);
+  require(neighbor && neighbor->compiled == 0 && state.registers[1] == 4,
+          "replacing changed code preserves neighboring cached blocks");
+}
+
 fn writable_code_dispatch() -> void {
   namespace mem = jit::memory;
   std::array<std::byte, mem::page_size> ram{};
@@ -2912,6 +2965,7 @@ fn main(int argc, char **argv) -> int {
   checked_addition();
   exception_return();
   syscall_exceptions();
+  conflicting_code_blocks();
   writable_code_dispatch();
   cross_page_code_validation();
   handoff_boundary();

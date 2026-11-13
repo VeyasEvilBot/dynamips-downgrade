@@ -76,6 +76,14 @@ stop bring-up rather than delivering complete architectural TLB exceptions.
 CPU-owned segment translation, a physical-region bus, deterministic device
 events/IRQ routing, and an independent interpreter remain migration work.
 
+A release-mode boot profile identified native block-cache churn. The bounded
+cache now holds 8,192 blocks in four-way sets, preserving executable-byte and
+mapping validation. On one Linux amd64 host, three-run median launch-to-banner
+time for IOS 12.4(24)T5 fell from 13.22 s to 2.89 s; legacy Dynamips reached the
+same banner in 1.03 s. Both used the same extracted image, NPE-400, 256 MiB RAM,
+and one pinned CPU. This is a boot-milestone comparison, not CLI readiness or
+network throughput. See `benchmarks/README.md` for the timing harness.
+
 Unsupported operations report typed failures. Reaching the banner does not
 prove that other images, networking, persistence or teardown are ready.
 

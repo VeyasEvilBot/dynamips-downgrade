@@ -24,7 +24,12 @@ export namespace jit {
 // effects.
 class memory_dispatcher {
 public:
-  static constexpr std::size_t cache_capacity = 1024;
+  // Keep hot loops resident when unrelated guest PCs share an index.
+  static constexpr std::size_t cache_capacity = 8192;
+  static constexpr std::size_t cache_ways = 4;
+  static constexpr std::size_t cache_sets = cache_capacity / cache_ways;
+  static_assert(cache_capacity % cache_ways == 0 &&
+                std::has_single_bit(cache_sets));
 
   [[nodiscard]] static fn create(memory::address_space &memory) noexcept
       -> std::expected<std::unique_ptr<memory_dispatcher>, dispatch_error> {
@@ -59,9 +64,7 @@ public:
         return std::unexpected(
             dispatch_error{dispatch_error_code::invalid_pc, state.pc.value});
       const let pc = state.pc.value;
-      const let index =
-          ((pc >> 2) ^ (pc >> 14) ^ (pc >> 26)) & (cache_capacity - 1);
-      let &entry = cache_[index];
+      let &entry = select(pc);
       if (!valid(entry, pc) ||
           entry.instructions > budget - result.instructions) {
         if (let compiled = compile(
@@ -115,14 +118,33 @@ private:
     std::array<const std::byte *, 2> host{};
   };
 
+  struct cache_set {
+    std::array<cached_block, cache_ways> entries{};
+    std::size_t victim = 0;
+  };
+
   memory::address_space &memory_;
   amd64::compiler compiler_;
-  std::array<cached_block, cache_capacity> cache_{};
+  std::array<cache_set, cache_sets> cache_{};
   alignas(std::max_align_t) std::array<std::byte, 64 * 1024> scratch_;
 
   memory_dispatcher(memory::address_space &memory,
                     amd64::compiler compiler) noexcept
       : memory_(memory), compiler_(std::move(compiler)) {}
+
+  fn select(std::uint64_t pc) noexcept -> cached_block & {
+    const let index = ((pc >> 2) ^ (pc >> 14) ^ (pc >> 26)) & (cache_sets - 1);
+    let &set = cache_[index];
+    for (let &entry : set.entries)
+      if (entry.code && entry.pc == pc)
+        return entry;
+    for (let &entry : set.entries)
+      if (!entry.code)
+        return entry;
+    let &entry = set.entries[set.victim];
+    set.victim = (set.victim + 1) % cache_ways;
+    return entry;
+  }
 
   fn valid(cached_block &entry, std::uint64_t pc) noexcept -> bool {
     if (!entry.code || entry.pc != pc)

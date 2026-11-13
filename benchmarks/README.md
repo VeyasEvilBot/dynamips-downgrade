@@ -36,3 +36,34 @@ cache probing remain separate work. MMIO callbacks receive the requested byte
 order and exchange numeric values once per access; scalar RAM operations support
 explicit big/little endianness and
 natural alignment for 1, 2, 4, and 8 bytes.
+
+
+## IOS boot timing
+
+Build both standalone binaries in release mode with the AMD64 JIT selected
+(`--dynamips_arch=amd64`), then compare the same extracted C7200 IOS ELF:
+
+```sh
+python3 benchmarks/boot.py build/linux/x86_64/release/dynamips \
+  --core legacy --image /path/to/c7200.image --label legacy --cpu 2
+python3 benchmarks/boot.py build/linux/x86_64/release/c7200-boot \
+  --image /path/to/c7200.image --label new --cpu 2
+```
+
+Choose an available CPU. The harness records three warm-file-cache process
+starts, measures launch to the first IOS banner, and writes console logs and
+JSON under `build/boot-bench`. Both machines use NPE-400 and 256 MiB RAM. The
+legacy console uses TCP because its terminal transport does not emit guest
+output through a redirected terminal. Legacy execution stops at the banner;
+the new core exits at its documented unsupported-device checkpoint. These
+measurements do not compare CLI readiness or networking.
+
+For a separate CPU sample, pass `--runs 1 --profiler /path/to/libprofiler.so`
+to the new-core command and keep release symbols/frame pointers in that
+binary. Dependencies of the profiler must be on the library search path.
+Google perftools may append a PID to the `.prof` filename. Analyze the result
+with `go tool pprof -top -cum /path/to/binary /path/to/profile`. Sampled runs
+include profiler overhead and must not be used for before/after timings.
+
+The JSON also reports peak child RSS (KiB on Linux) across the run group.
+It includes the full process lifetime, including teardown after the banner.
