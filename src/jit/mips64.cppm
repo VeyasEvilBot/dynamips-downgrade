@@ -57,7 +57,7 @@ struct cop0_state {
 
   // Count ticks every two virtual CPU cycles. Dispatch uses instruction slots
   // as a deterministic cycle estimate, observed at block boundaries.
-  fn advance_cycles(std::uint64_t cycles) noexcept -> void {
+  inline fn advance_cycles(std::uint64_t cycles) noexcept -> void {
     const let odd = (cycles & 1) != 0;
     const let ticks = cycles / 2 + (odd && half_cycle ? 1u : 0u);
     half_cycle = half_cycle != odd;
@@ -69,7 +69,7 @@ struct cop0_state {
       registers[13] |= 1u << 15;
   }
 
-  fn interrupt_pending() const noexcept -> bool {
+  inline fn interrupt_pending() const noexcept -> bool {
     return (registers[12] & 7) == 1 &&
            (registers[12] & registers[13] & 0xff00) != 0;
   }

@@ -74,15 +74,21 @@ can compile shorter straight-line prefixes for small budgets; a branch and
 its delay slot still require a budget of at least two. Memory faults still
 stop bring-up rather than delivering complete architectural TLB exceptions.
 CPU-owned segment translation, a physical-region bus, deterministic device
-events/IRQ routing, and an independent interpreter remain migration work.
+events/IRQ routing remain migration work. A bounded independent integer interpreter now executes cold blocks and provides differential checks.
 
-A release-mode boot profile identified native block-cache churn. The bounded
-cache now holds 8,192 blocks in four-way sets, preserving executable-byte and
-mapping validation. On one Linux amd64 host, three-run median launch-to-banner
-time for IOS 12.4(24)T5 fell from 13.22 s to 2.89 s; legacy Dynamips reached the
-same banner in 1.03 s. Both used the same extracted image, NPE-400, 256 MiB RAM,
-and one pinned CPU. This is a boot-milestone comparison, not CLI readiness or
-network throughput. See `benchmarks/README.md` for the timing harness.
+The execution cache retains 8,192 blocks in four-way sets. Cold integer blocks
+use an independent interpreter before native promotion; hot loops use bounded
+native traces. RAM write versions, opaque-callback epochs and byte checks preserve
+code coherency, including physical aliases. Checked native RAM probes retain
+fault/MMIO fallbacks. Traces stop for instruction budgets, timer deadlines,
+code changes and device-service boundaries.
+
+On one Linux amd64 host, seven alternating process starts per core using the
+same IOS 12.4(24)T5 image and CPU 2 measured median launch-to-banner times of
+1.026 s for the new core and 1.111 s for legacy Dynamips (7.7% less time).
+The previous rewrite checkpoint measured 2.89 s. These are host-specific boot
+milestone measurements; CLI readiness and networking remain unvalidated.
+See `benchmarks/README.md` for reproduction commands.
 
 Unsupported operations report typed failures. Reaching the banner does not
 prove that other images, networking, persistence or teardown are ready.

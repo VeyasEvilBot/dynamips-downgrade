@@ -109,6 +109,16 @@ fn main() -> int {
                "aligned C++ allocation retains RAII ownership"))
       return 1;
     std::memset(memory->get(), 0xa5, 8192);
+    let pages = host::map_zeroed(8193);
+    if (!check(pages && pages->get()[0] == 0 && pages->get()[8192] == 0 &&
+                   !host::map_zeroed(0),
+               "anonymous RAM begins zeroed and rejects an empty mapping"))
+      return 1;
+    pages->get()[8192] = 99;
+    let moved_pages = std::move(*pages);
+    if (!check(!*pages && moved_pages.get()[8192] == 99,
+               "moving anonymous RAM transfers its mapping lifetime"))
+      return 1;
     return 0;
   }();
   const int removed = unlink(filename);

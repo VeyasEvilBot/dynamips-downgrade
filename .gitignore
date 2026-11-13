@@ -13,3 +13,5 @@
 *.dylib
 *.exe
 ilt_*
+
+/benchmarks/__pycache__/

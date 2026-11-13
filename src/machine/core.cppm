@@ -134,7 +134,7 @@ public:
       return std::unexpected(setup_error{setup_issue::invalid_firmware});
     try {
       let result = std::unique_ptr<instance>{new instance{model}};
-      let ram = host::allocate_aligned(mem::page_size, model.ram_bytes);
+      let ram = host::map_zeroed(model.ram_bytes);
       let backing = host::allocate_aligned(
           mem::page_size, static_cast<std::size_t>(model.rom.size));
       if (!ram)
@@ -143,7 +143,6 @@ public:
         return std::unexpected(setup_error{backing.error()});
       result->ram_ = std::move(*ram);
       result->rom_ = std::move(*backing);
-      std::memset(result->ram_.get(), 0, model.ram_bytes);
       std::memset(result->rom_.get(), 0,
                   static_cast<std::size_t>(model.rom.size));
       const let rom_loaded = result->load(rom, false);
@@ -217,7 +216,7 @@ public:
       }
       result->memory_->set_translation(result.get(), &instance::translate);
       if (mode == boot_mode::run) {
-        let dispatch = jit::memory_dispatcher::create(*result->memory_);
+        let dispatch = jit::memory_dispatcher::create(*result->memory_, 32);
         if (!dispatch)
           return std::unexpected(setup_error{dispatch.error()});
         result->dispatch_ = std::move(*dispatch);
@@ -293,7 +292,8 @@ public:
 
 private:
   definition model_;
-  host::owned_bytes ram_, rom_;
+  host::mapped_bytes ram_;
+  host::owned_bytes rom_;
   jit::devices::bus devices_;
   std::unique_ptr<mem::address_space> memory_;
   std::vector<jit::mips64::instruction_word> boot_;

@@ -51,7 +51,7 @@ echo "All test suites passed"
 
 [tasks."test:core"]
 description = "test JIT, queued devices and guest memory"
-run = "xmake test --output-on-failure 'jit-test/*' 'memory-test/*' 'device-test/*'"
+run = "xmake test --output-on-failure 'jit-test/*' 'interpreter-test/*' 'memory-test/*' 'device-test/*'"
 
 [tasks."test:devices"]
 description = "test queued UART dispatch, FIFO backpressure and MMIO"
@@ -64,7 +64,7 @@ run = "xmake test --output-on-failure 'console-test/*'"
 [tasks."test:boot"]
 description = "gate each boot change with JIT semantics and the real C7200 ROM boundary"
 # Rebuild module consumers together to avoid stale Clang BMI crashes.
-run = "xmake build -r -y jit-test machine-test c7200-boot && xmake test --output-on-failure 'jit-test/*' 'machine-test/*'"
+run = "xmake build -r -y jit-test interpreter-test machine-test c7200-boot && xmake test --output-on-failure 'jit-test/*' 'interpreter-test/*' 'machine-test/*'"
 
 [tasks."test:machine"]
 description = "test chassis composition, ELF loading and the real C7200 ROM boot boundary"
@@ -163,7 +163,7 @@ depends = ["compiledb"]
 # MissingIncludes does not recognize native module imports; keep unused-header checks.
 run = """
 clang-tidy -p . -checks='-*,clang-analyzer-core.*,clang-analyzer-cplusplus.*,clang-analyzer-deadcode.*,clang-analyzer-unix.*,bugprone-use-after-move,bugprone-unused-return-value,misc-include-cleaner' -config='{CheckOptions: {misc-include-cleaner.MissingIncludes: false}}' -warnings-as-errors='*' --quiet \
-  src/jit/*.cppm src/devices/*.cppm src/machine/*.cppm src/boot_main.cpp src/jit_main.cpp tests/console.cpp tests/console_guest.cpp tests/machine.cpp tests/jit.cpp tests/memory.cpp tests/devices.cpp
+  src/jit/*.cppm src/devices/*.cppm src/machine/*.cppm src/boot_main.cpp src/jit_main.cpp tests/console.cpp tests/console_guest.cpp tests/machine.cpp tests/jit.cpp tests/interpreter.cpp tests/memory.cpp tests/devices.cpp
 """
 
 [tasks."lint:clangd"]
@@ -171,7 +171,7 @@ description = "check clangd parsing for playground modules and consumers"
 depends = ["compiledb"]
 run = '''
 set -eu
-for source in modules/asmjit.cppm src/host/*.cppm src/jit/*.cppm src/devices/*.cppm src/machine/*.cppm src/boot_main.cpp src/jit_main.cpp tests/console.cpp tests/console_guest.cpp tests/machine.cpp tests/jit.cpp tests/memory.cpp tests/devices.cpp tests/host.cpp tests/host_compat.c common/host_memory_compat.cpp; do
+for source in modules/asmjit.cppm src/host/*.cppm src/jit/*.cppm src/devices/*.cppm src/machine/*.cppm src/boot_main.cpp src/jit_main.cpp tests/console.cpp tests/console_guest.cpp tests/machine.cpp tests/jit.cpp tests/interpreter.cpp tests/memory.cpp tests/devices.cpp tests/host.cpp tests/host_compat.c common/host_memory_compat.cpp; do
   echo "Checking clangd: $source"
   clangd --check="$source" --tweaks= --log=error
 done
@@ -195,7 +195,7 @@ description = "generate clangd compile commands for C and C++ sources"
 depends = ["build:native"]
 run = '''
 set -eu
-xmake build -y jit-playground jit-test memory-test device-test host-test console-test machine-test c7200-boot memory-bench dynamips-module-test
+xmake build -y jit-playground jit-test interpreter-test memory-test device-test host-test console-test machine-test c7200-boot memory-bench dynamips-module-test
 compiledb_stage=$(mktemp -d "$PWD/build/compiledb.XXXXXX")
 trap 'rm -rf "$compiledb_stage"' EXIT
 xmake project -k compile_commands --lsp=clangd "$compiledb_stage"

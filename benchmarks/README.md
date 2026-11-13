@@ -67,3 +67,17 @@ include profiler overhead and must not be used for before/after timings.
 
 The JSON also reports peak child RSS (KiB on Linux) across the run group.
 It includes the full process lifetime, including teardown after the banner.
+
+For an alternating comparison (seven starts per core, reversing each pair):
+
+```sh
+python3 benchmarks/boot_compare.py NEW_RELEASE_BINARY LEGACY_RELEASE_BINARY \
+  --image /path/to/c7200.image --cpu 2 --runs 7
+```
+
+This records both medians, individual samples, image hash and console logs.
+A measured checkpoint on Linux amd64 gave 1.026 s new versus 1.111 s legacy.
+Timing includes process startup and ends at the IOS banner, not a working CLI.
+The cold interpreter avoids compiling one-off blocks. Bounded native traces,
+checked RAM probes and successor lookup hints reduce execution overhead;
+every hinted successor still undergoes normal code/mapping validation.

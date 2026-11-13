@@ -56,11 +56,11 @@ end
 
 local code = "stable"
 local jit_arch = get_config("dynamips_arch") or default_jit_arch
-local generated_dir = path.join("$(builddir)", "generated", code)
+local generated_dir = path.join(get_config("builddir") or "build", "generated", code)
 
 rule("dynamips.microcode")
     before_buildcmd_file(function (target, batchcmds, sourcefile, opt)
-        local outputfile = path.join("build", "generated", code, path.basename(sourcefile) .. "_dump.inc")
+        local outputfile = path.join(generated_dir, path.basename(sourcefile) .. "_dump.inc")
         local address = path.basename(sourcefile) == "mips64_microcode" and "0xbfc00000" or "0xfff00000"
         batchcmds:show_progress(opt.progress, "${color.build.object}generating %s", outputfile)
         batchcmds:mkdir(path.directory(outputfile))
@@ -227,7 +227,7 @@ target("jit-core")
     add_cxxflags("-Wextra", "-Wpedantic", "-Wshadow", "-Wconversion", "-Wsign-conversion")
     add_includedirs("include")
     add_packages("asmjit", { public = true })
-    add_files("modules/asmjit.cppm", "src/jit/ir.cppm", "src/jit/tlb.cppm", "src/jit/mips64.cppm", "src/jit/amd64.cppm", "src/jit/memory.cppm", "src/jit/fifo.cppm", "src/jit/uart.cppm", "src/jit/example.cppm", "src/jit/dispatch.cppm", "src/jit/memory_dispatch.cppm", "src/jit/devices.cppm", "src/jit/execution.cppm", { public = true })
+    add_files("modules/asmjit.cppm", "src/jit/ir.cppm", "src/jit/tlb.cppm", "src/jit/mips64.cppm", "src/jit/amd64.cppm", "src/jit/memory.cppm", "src/jit/fifo.cppm", "src/jit/uart.cppm", "src/jit/example.cppm", "src/jit/dispatch.cppm", "src/jit/memory_dispatch.cppm", "src/jit/interpreter.cppm", "src/jit/devices.cppm", "src/jit/execution.cppm", { public = true })
 target_end()
 
 target("uart-console")
@@ -282,6 +282,17 @@ target("jit-test")
     add_files("tests/jit.cpp")
     add_tests("lowering")
     add_tests("devices", {runargs = {"--devices"}})
+target_end()
+
+target("interpreter-test")
+    set_default(false)
+    set_kind("binary")
+    set_warnings("all", "error")
+    add_cxxflags("-Wextra", "-Wpedantic", "-Wshadow", "-Wconversion", "-Wsign-conversion")
+    add_includedirs("include")
+    add_deps("jit-core")
+    add_files("tests/interpreter.cpp")
+    add_tests("semantics")
 target_end()
 
 target("memory-test")

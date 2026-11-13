@@ -10,6 +10,7 @@ module;
 #include <cerrno>
 #include <cstdio>
 #include <limits>
+#include <sys/mman.h>
 
 export module host_memory;
 
@@ -19,6 +20,19 @@ struct free_bytes {
 };
 
 using owned_bytes = std::unique_ptr<unsigned char, free_bytes>;
+
+struct unmap_bytes {
+  std::size_t size = 0;
+  fn operator()(unsigned char *ptr) const noexcept -> void {
+    static_cast<void>(munmap(ptr, size));
+  }
+};
+
+using mapped_bytes = std::unique_ptr<unsigned char, unmap_bytes>;
+
+// Anonymous pages begin zeroed and are committed by the host on demand.
+fn map_zeroed(std::size_t size) noexcept
+    -> std::expected<mapped_bytes, std::error_code>;
 
 struct file_buffer {
   owned_bytes bytes;
@@ -82,6 +96,17 @@ fn read_file_bounded(const char *filename, std::size_t limit,
   if (std::fclose(input.release()) != 0)
     return failure(errno);
   return file_buffer{std::move(bytes), size};
+}
+
+fn map_zeroed(std::size_t size) noexcept
+    -> std::expected<mapped_bytes, std::error_code> {
+  if (!size)
+    return failure(EINVAL);
+  void *ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (ptr == MAP_FAILED)
+    return failure(errno);
+  return mapped_bytes{static_cast<unsigned char *>(ptr), unmap_bytes{size}};
 }
 
 fn allocate_aligned(std::size_t alignment, std::size_t size) noexcept
