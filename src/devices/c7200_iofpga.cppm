@@ -1,4 +1,5 @@
 module;
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,7 @@ import jit.devices;
 import jit.memory;
 import jit.uart;
 import devices.serial_eeprom;
+import devices.ds1620;
 
 export namespace dynamips::devices {
 class c7200_iofpga {
@@ -38,6 +40,9 @@ public:
     cpu_eeprom_.reset();
     midplane_eeprom_.reset();
     eeprom_pins_ = 0;
+    for (let &sensor : sensors_)
+      sensor.reset();
+    temperature_control_ = temperature_data_ = 0;
     console_.reset();
     auxiliary_.reset();
     control_ = 0;
@@ -57,6 +62,8 @@ private:
   std::uint8_t interrupt_mask_ = 0;
   nmc93c46 cpu_eeprom_, midplane_eeprom_;
   std::uint32_t eeprom_pins_ = 0;
+  std::array<ds1620, 4> sensors_{};
+  std::uint32_t temperature_control_ = 0, temperature_data_ = 0;
   jit::memory::device endpoint_;
 
   static fn valid_size(jit::memory::access_size size) noexcept -> bool {
@@ -77,6 +84,16 @@ private:
     let &self = *static_cast<c7200_iofpga *>(context);
     const let offset = access.address.value - 0x1e840000;
     switch (offset) {
+    case 0x20c:
+      return self.temperature_control_;
+    case 0x214:
+      return self.temperature_data_;
+    case 0x22c: {
+      std::uint32_t value = 0;
+      for (unsigned i = 0; i < self.sensors_.size(); i++)
+        value |= static_cast<std::uint32_t>(self.sensors_[i].output()) << i;
+      return value;
+    }
     case 0x21c: {
       let value = self.eeprom_pins_;
       if (value & 4)
@@ -137,6 +154,20 @@ private:
     let &self = *static_cast<c7200_iofpga *>(context);
     const let offset = access.address.value - 0x1e840000;
     switch (offset) {
+    case 0x20c:
+      self.temperature_control_ = static_cast<std::uint32_t>(value) & 0x1f;
+      for (unsigned i = 0; i < self.sensors_.size(); i++)
+        if (!self.sensors_[i].pins((value & (1u << i)) != 0,
+                                   (value & 0x10) != 0))
+          return std::unexpected(jit::memory::device_error::bus);
+      return {};
+    case 0x214:
+      self.temperature_data_ = static_cast<std::uint32_t>(value);
+      for (let &sensor : self.sensors_)
+        sensor.input((value & 1) != 0);
+      return {};
+    case 0x22c:
+      return std::unexpected(jit::memory::device_error::bus);
     case 0x21c:
       self.eeprom_pins_ = static_cast<std::uint32_t>(value);
       self.cpu_eeprom_.write((value & 4) != 0, (value & 2) != 0,
