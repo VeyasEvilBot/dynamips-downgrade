@@ -34,7 +34,9 @@ struct fixture {
   std::unique_ptr<mem::address_space> memory;
   jit::physical::bus bus;
 
-  fixture() : bus(make_bus()) {
+  explicit fixture(mem::translation_effect effect =
+                       mem::translation_effect::guest_state_preserving)
+      : bus(make_bus()) {
     let space = mem::address_space::create(ram, 0);
     require(space.has_value(), "create translated address space");
     memory = std::move(*space);
@@ -54,7 +56,8 @@ struct fixture {
             return std::unexpected(fault);
           }
           return *result;
-        });
+        },
+        effect);
   }
 
   fn make_bus() -> jit::physical::bus {
@@ -77,10 +80,10 @@ struct fixture {
   }
 };
 
-fn data_faults() -> void {
+fn data_faults(mem::translation_effect effect) -> void {
   for (const unsigned tier : {0u, 1u, 2u}) {
     for (const unsigned kind : {0u, 1u, 2u, 3u}) {
-      fixture f;
+      fixture f{effect};
       const bool store = kind == 2;
       f.word(0, 0x24210001);
       f.word(4, store ? 0xac620000 : 0x8c620000);
@@ -121,9 +124,9 @@ fn data_faults() -> void {
     }
   }
 }
-fn data_delay_slots() -> void {
+fn data_delay_slots(mem::translation_effect effect) -> void {
   for (const unsigned tier : {0u, 1u, 2u}) {
-    fixture f;
+    fixture f{effect};
     f.word(0, 0x24210001);
     f.word(4, 0x1424fffe);
     f.word(8, 0x8c620000);
@@ -286,8 +289,11 @@ fn irq_and_asid() -> void {
 } // namespace
 
 fn main() -> int {
-  data_faults();
-  data_delay_slots();
+  for (const let effect : {mem::translation_effect::opaque,
+                           mem::translation_effect::guest_state_preserving}) {
+    data_faults(effect);
+    data_delay_slots(effect);
+  }
   fetch_slots();
   refill_and_privilege();
   irq_and_asid();

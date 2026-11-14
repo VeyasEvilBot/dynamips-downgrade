@@ -196,7 +196,7 @@ public:
       let space =
           mem::address_space::create(std::as_writable_bytes(std::span{
                                          result->ram_.get(), model.ram_bytes}),
-                                     pages * 2);
+                                     pages * 2, mem::backing_policy::tracked);
       if (!space)
         return std::unexpected(setup_error{space.error()});
       result->memory_ = std::move(*space);
@@ -270,7 +270,9 @@ public:
         return std::unexpected(setup_error{setup_issue::invalid_definition,
                                            bus_mapping.error().index});
       result->physical_.emplace(std::move(*bus_mapping));
-      result->memory_->set_translation(result.get(), &instance::translate);
+      result->memory_->set_translation(
+          result.get(), &instance::translate,
+          mem::translation_effect::guest_state_preserving);
       if (mode == boot_mode::run) {
         let dispatch = jit::memory_dispatcher::create(*result->memory_, 32);
         if (!dispatch)
@@ -331,7 +333,12 @@ public:
   }
   fn model() const noexcept -> const definition & { return model_; }
   fn cpu() const noexcept -> const jit::mips64::state & { return state_; }
-  fn memory() noexcept -> mem::address_space & { return *memory_; }
+
+  // Callers write RAM through these APIs; cached backing pointers are
+  // read-only.
+  fn memory() noexcept -> mem::address_space & {
+    return *memory_;
+  }
   fn ios_entry() const noexcept -> std::optional<std::uint64_t> {
     return ios_entry_;
   }
@@ -371,7 +378,7 @@ private:
   static fn translate(void *context, mem::virtual_address address,
                        mem::access_kind access, mem::access_size size) noexcept
       -> std::expected<mem::translated_page, mem::fault> {
-    let &self = *static_cast<instance *>(context);
+    const let &self = *static_cast<const instance *>(context);
     const let physical =
         jit::mmu::translate(self.state_.cop0, address, access, size);
     if (!physical)

@@ -312,12 +312,17 @@ private:
     return successor;
   }
 
+  [[nodiscard]] inline fn validated(const cached_block &entry) const noexcept
+      -> bool {
+    return entry.validated_slice == slice_ ||
+           (!memory_.requires_slice_validation() && entry.validated_slice != 0);
+  }
+
   [[gnu::always_inline]] fn valid(cached_block &entry,
                                    std::uint64_t pc) noexcept -> bool {
     if ((!entry.code && !entry.cold) || entry.pc != pc)
       return false;
-    if (entry.generation == memory_.mapping_generation() &&
-        entry.validated_slice == slice_ &&
+    if (entry.generation == memory_.mapping_generation() && validated(entry) &&
         entry.external_generation == memory_.external_generation() &&
         entry.versions[0] == entry.stamps[0].value() &&
         entry.versions[1] == entry.stamps[1].value())
@@ -342,8 +347,8 @@ private:
     }
     const let external = memory_.external_generation();
     const std::array versions{entry.stamps[0].value(), entry.stamps[1].value()};
-    if (entry.validated_slice == slice_ &&
-        entry.external_generation == external && entry.versions == versions)
+    if (validated(entry) && entry.external_generation == external &&
+        entry.versions == versions)
       return true;
     const let bytes =
         std::as_bytes(std::span{entry.source}).first(entry.instructions * 4);
@@ -474,6 +479,9 @@ private:
     entry.code.reset();
     if (!cold)
       entry.code.emplace(std::move(native->code));
+    if (!revalidate(entry, pc))
+      return std::unexpected(
+          dispatch_error{dispatch_error_code::code_changed, pc});
     return !cold;
   }
 };

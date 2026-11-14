@@ -34,7 +34,7 @@ xmake f -m "$mode" --system_packages="${DYNAMIPS_CI_SYSTEM_PACKAGES:-y}" --dynam
 # Build the module consumers together. A legacy test success does not validate these.
 xmake build -r -j "$jobs" -y \
     jit-test interpreter-test mmu-test cpu-fault-test physical-test exceptions-test \
-    memory-test device-test host-test console-test rommon-test bootflash-test \
+    memory-test ownership-test device-test host-test console-test rommon-test bootflash-test \
     interrupt-test pcmcia-test temperature-test machine-test c7200-boot \
     dynamips-downgrade terminal-console-test jit-playground
 

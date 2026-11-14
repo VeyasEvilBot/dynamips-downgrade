@@ -146,6 +146,7 @@ public:
                       mips64::cop1_state *cop1) noexcept
         : context_{&memory, cop0, hilo, cop1, {}, memory.read_cache()},
           state_(state) {
+      context_.writes.architectural_state = std::as_bytes(state);
       context_.writes.context = &context_;
       context_.writes.before_external =
           cop0 ? &account_before_external : nullptr;

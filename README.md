@@ -94,6 +94,12 @@ fault/MMIO fallbacks. Traces stop for instruction budgets, timer deadlines,
 code changes and device-service boundaries. Native calls reuse a per-slice
 execution session; fault and exception metadata is decoded on those exits.
 
+The standalone machine owns its RAM and routes runtime writes through the memory
+APIs, allowing reuse of validated page versions across execution slices. Borrowed
+backing is checked between slices, and opaque callbacks require a fresh proof.
+The CPU MMU translation callback explicitly preserves guest state.
+
+
 Before the MMU/exception refactor, seven alternating process starts per core on
 one Linux amd64 host using the
 same IOS 12.4(24)T5 image and CPU 2 measured median launch-to-banner times of

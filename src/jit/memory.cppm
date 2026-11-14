@@ -117,6 +117,10 @@ using translation_callback = auto (*)(void *, virtual_address, access_kind,
                                       access_size) noexcept
     -> std::expected<translated_page, fault>;
 
+// Guest-state-preserving callbacks may update host diagnostics only. Guest
+// RAM, GPRs and CP0 state remain unchanged, including when translation fails.
+enum class translation_effect { opaque, guest_state_preserving };
+
 inline constexpr std::size_t page_size = 4096;
 
 struct cache_entry {
@@ -149,7 +153,14 @@ struct write_monitor {
   bool modified = false;
   void *context = nullptr;
   void (*before_external)(void *) noexcept = nullptr;
+  // Borrowed CPU-state bytes outlive the monitoring scope.
+  std::span<const std::byte> architectural_state{};
 };
+
+// While execution caches are active, tracked owners route every RAM write
+// through this space and keep executable non-RAM backing immutable. Borrowed
+// backing is rechecked between slices.
+enum class backing_policy { borrowed, tracked };
 
 class address_space {
 public:
@@ -179,6 +190,14 @@ public:
   static constexpr std::size_t second_level_entries = 4096;
   address_space(const address_space &) = delete;
   fn operator=(const address_space &) -> address_space & = delete;
+
+  [[nodiscard]] inline fn policy() const noexcept -> backing_policy {
+    return backing_;
+  }
+
+  [[nodiscard]] inline fn requires_slice_validation() const noexcept -> bool {
+    return backing_ != backing_policy::tracked;
+  }
 
   inline fn mapping_generation() const noexcept -> std::uint64_t {
     return generation_;
@@ -212,10 +231,12 @@ public:
   }
 
   // The translation owner and returned backing outlive this address space.
-  fn set_translation(void *context, translation_callback callback) noexcept
-      -> void {
+  fn set_translation(
+      void *context, translation_callback callback,
+      translation_effect effect = translation_effect::opaque) noexcept -> void {
     translation_context_ = context;
     translate_ = callback;
+    translation_effect_ = effect;
     invalidate();
   }
 
@@ -270,11 +291,13 @@ public:
     return update_result{updates.size(), batch.count, batch.full};
   }
 
-  [[nodiscard]] static fn create(std::span<std::byte> ram,
-                                  std::size_t mapping_capacity) noexcept
+  [[nodiscard]] static fn
+  create(std::span<std::byte> ram, std::size_t mapping_capacity,
+         backing_policy backing = backing_policy::borrowed) noexcept
       -> std::expected<std::unique_ptr<address_space>, mapping_error> {
     try {
-      let result = std::unique_ptr<address_space>{new address_space{ram}};
+      let result =
+          std::unique_ptr<address_space>{new address_space{ram, backing}};
       if (mapping_capacity > result->mappings_.max_size())
         return std::unexpected(mapping_error::capacity_exhausted);
       result->mappings_.reserve(mapping_capacity);
@@ -588,6 +611,7 @@ private:
   write_monitor *monitor_ = nullptr;
   reservation reservation_;
   std::span<std::byte> ram_;
+  const backing_policy backing_;
   std::vector<std::uint64_t> write_versions_;
   std::uint64_t external_generation_ = 0;
 
@@ -607,8 +631,11 @@ private:
   bool sealed_code_ = false;
   void *translation_context_ = nullptr;
   translation_callback translate_ = nullptr;
+  translation_effect translation_effect_ = translation_effect::opaque;
 
-  explicit address_space(std::span<std::byte> ram) noexcept : ram_(ram) {}
+  explicit address_space(std::span<std::byte> ram,
+                         backing_policy backing) noexcept
+      : ram_(ram), backing_(backing) {}
 
   inline fn external_effect() noexcept -> void {
     external_generation_++;
@@ -639,6 +666,15 @@ private:
     }
     if (!monitor_ || monitor_->modified)
       return;
+    const let state = monitor_->architectural_state;
+    if (!state.empty()) {
+      const let state_begin = reinterpret_cast<std::uintptr_t>(state.data());
+      if (state.size() > UINTPTR_MAX - state_begin ||
+          (begin < state_begin + state.size() && state_begin < end)) {
+        monitor_->modified = true;
+        return;
+      }
+    }
     for (const let range : monitor_->ranges) {
       const let code = reinterpret_cast<std::uintptr_t>(range.data());
       if (begin < code + range.size() && code < begin + size) {
@@ -781,6 +817,8 @@ private:
       if (!translate_)
         return std::unexpected(
             fault{address, fault_reason::unmapped, access, size});
+      if (translation_effect_ != translation_effect::guest_state_preserving)
+        external_effect();
       const let translated =
           translate_(translation_context_, address, access, size);
       if (!translated)
