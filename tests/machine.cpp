@@ -405,6 +405,9 @@ fn io_console() -> bool {
     return mem::device_access{
         {0x1e840000 + offset}, std::endian::big, mem::access_size::byte};
   };
+  if (!endpoint.write(endpoint.context, access(0x414), 5) ||
+      !endpoint.write(endpoint.context, access(0x454), 4))
+    return false;
   const std::array input{std::byte{'C'}};
   if (!check(endpoint.write(endpoint.context, access(0x41c), 'A').has_value() &&
                  endpoint.write(endpoint.context, access(0x45c), 'B')
@@ -833,6 +836,16 @@ fn rom_service_queues() -> bool {
         return false;
     return guest.store<std::uint32_t>({0x8058}, 2).has_value();
   };
+  const let set = [&](std::string_view assignment) {
+    if (!guest.store<std::uint32_t>({0x8058}, 3))
+      return false;
+    for (const char byte : assignment)
+      if (!guest.store<std::uint32_t>({0x8054},
+                                      static_cast<unsigned char>(byte)))
+        return false;
+    return guest.store<std::uint32_t>({0x8058}, 1).has_value() &&
+           guest.load<std::uint32_t>({0x8058}) == 0;
+  };
   if (!check(query("MISSING") &&
                  guest.load<std::uint32_t>({0x8058}) == UINT32_MAX &&
                  guest.load<std::uint32_t>({0x8054}) == 0,
@@ -852,17 +865,28 @@ fn rom_service_queues() -> bool {
                  guest.load<std::uint32_t>({0x8054}) == 0,
              "empty ROMMON values remain distinct from missing variables"))
     return false;
+  if (!check(
+          set("BOOT_TEST=override") && query("BOOT_TEST") &&
+              environment[0].value == "flash:image.bin",
+          "guest updates shadow immutable boot defaults without changing them"))
+    return false;
+  for (const char byte : std::string_view{"override"})
+    if (!check(guest.load<std::uint32_t>({0x8054}) ==
+                   static_cast<unsigned char>(byte),
+               "read updated boot variable"))
+      return false;
   if (!guest.store<std::uint32_t>({0x8058}, 3))
     return false;
   for (std::size_t i = 0; i < 1024; i++)
     if (!guest.store<std::uint32_t>({0x8054}, 'X'))
       return false;
-  if (!check(guest.store<std::uint32_t>({0x8058}, 2).has_value() &&
-                 guest.load<std::uint32_t>({0x8058}) == UINT32_MAX &&
-                 query("BOOT_TEST") &&
-                 guest.load<std::uint32_t>({0x8058}) == 0 &&
-                 !guest.store<std::uint32_t>({0x8058}, 1),
-             "oversized queries recover; variable writes remain unsupported"))
+  if (!check(
+          guest.store<std::uint32_t>({0x8058}, 2).has_value() &&
+              guest.load<std::uint32_t>({0x8058}) == UINT32_MAX &&
+              query("BOOT_TEST") && guest.load<std::uint32_t>({0x8058}) == 0 &&
+              guest.store<std::uint32_t>({0x8058}, 1).has_value() &&
+              guest.load<std::uint32_t>({0x8058}) == UINT32_MAX,
+          "oversized queries recover and malformed assignments report failure"))
     return false;
   bus.reset();
   if (!check(guest.load<std::uint32_t>({0x8058}) == 0 &&

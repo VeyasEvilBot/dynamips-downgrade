@@ -210,6 +210,94 @@ fn branch_boundaries() -> void {
           "delay slot");
 }
 
+fn signed_likely_branches() -> void {
+  std::array<std::byte, mem::page_size> ram{};
+  let memory = mem::address_space::create(ram, 0);
+  let compiler = jit::amd64::compiler::create();
+  require(memory && compiler, "create signed likely branch execution");
+  for (const std::uint32_t op : {0x16u, 0x17u}) {
+    for (const std::uint64_t operand :
+         {0ULL, 1ULL, 0xffffffffffffffffULL, 0x80000000ULL,
+          0xffffffff00000000ULL, 0x8000000000000000ULL,
+          0x7fffffffffffffffULL}) {
+      const bool positive = operand != 0 && (operand >> 63) == 0;
+      const bool taken = op == 0x17 ? positive : !positive;
+      for (const bool faulting_slot : {false, true}) {
+        for (const bool optimized : {false, true}) {
+          const std::array<cpu::instruction_word, 3> words{
+              {{0x24e70001},
+               {(op << 26) | (1u << 21) | 3u},
+               {faulting_slot ? 0x8c620000u : 0x24420001u}}};
+          require(cpu::is_branch(words[1]) && cpu::has_delay_slot(words[1]) &&
+                      interp::supports(words) &&
+                      !interp::supports(std::span{words}.first(2)),
+                  "signed likely branches require a complete delay slot");
+          cpu::state reference{};
+          reference.registers[1] = operand;
+          reference.registers[2] = 99;
+          reference.registers[3] = 0x9000;
+          let actual = reference;
+          alignas(std::max_align_t) std::array<std::byte, 64 * 1024> storage;
+          std::pmr::monotonic_buffer_resource arena{
+              storage.data(), storage.size(), std::pmr::null_memory_resource()};
+          let ir = cpu::translate(words, {0x8000}, arena);
+          require(ir.has_value(), "translate signed likely branch");
+          if (optimized)
+            require(jit::ir::optimize(*ir, jit::ir::fold_constants,
+                                      jit::ir::simplify_identities)
+                        .has_value(),
+                    "optimize signed likely branch");
+          let native = compiler->compile(*ir, arena);
+          require(native.has_value(), "compile signed likely branch");
+          const let interpreted =
+              interp::execute(words, {0x8000}, reference, **memory);
+          const let executed =
+              native->execute(actual.registers, **memory, &actual.cop0,
+                              &actual.hilo, &actual.cop1);
+          if (taken && faulting_slot) {
+            require(
+                !interpreted && !executed &&
+                    interpreted.error().code == interp::error_code::memory &&
+                    interpreted.error().pc == 0x8008 &&
+                    interpreted.error().branch_pc == 0x8004 &&
+                    interpreted.error().instructions == 2 &&
+                    executed.error().code ==
+                        jit::amd64::error_code::memory_fault &&
+                    executed.error().pc == 0x8008 &&
+                    executed.error().branch_pc == 0x8004 &&
+                    executed.error().instructions == 2 &&
+                    actual.registers[2] == 99 && actual.registers[7] == 1 &&
+                    reference.registers == actual.registers,
+                "taken signed likely slots preserve the fault PC, branch PC "
+                "and exact completed prefix in both tiers");
+          } else {
+            const let slots = taken ? 3u : 2u;
+            const let next = taken ? 0x8014u : 0x800cu;
+            require(interpreted && executed && interpreted->next_pc == next &&
+                        executed->next_pc == next &&
+                        interpreted->instructions == slots &&
+                        executed->instructions == slots &&
+                        actual.registers[2] == (taken ? 100u : 99u) &&
+                        actual.registers[7] == 1 &&
+                        reference.registers == actual.registers,
+                    "signed 64-bit likely predicates and annulled slots agree "
+                    "in interpreter, optimized and unoptimized native code");
+          }
+        }
+      }
+    }
+    alignas(std::max_align_t) std::array<std::byte, 64 * 1024> storage;
+    std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                              std::pmr::null_memory_resource()};
+    const std::array<cpu::instruction_word, 2> invalid{
+        {{(op << 26) | (1u << 21) | (1u << 16) | 3u}, {0}}};
+    const let translated = cpu::translate(invalid, {0x8000}, arena);
+    require(!interp::supports(invalid) && !translated &&
+                translated.error().code == cpu::error_code::invalid_encoding,
+            "BLEZL/BGTZL reject nonzero reserved rt fields");
+  }
+}
+
 fn memory_faults_and_aliases() -> void {
   std::array<std::byte, mem::page_size> ram{};
   let memory = mem::address_space::create(ram, 2);
@@ -332,6 +420,7 @@ fn main() -> int {
   differential();
   arithmetic_and_rejection();
   branch_boundaries();
+  signed_likely_branches();
   memory_faults_and_aliases();
   merged_accesses();
   mmio_clock();

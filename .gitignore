@@ -14,4 +14,4 @@
 *.exe
 ilt_*
 
-/benchmarks/__pycache__/
+__pycache__/

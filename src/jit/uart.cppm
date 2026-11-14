@@ -36,6 +36,9 @@ public:
     rx_ = {};
   }
 
+  fn clear_input() noexcept -> void { rx_ = {}; }
+  fn clear_output() noexcept -> void { tx_ = {}; }
+
   fn pending_input() const noexcept -> std::size_t { return rx_.size(); }
 
   fn pending() const noexcept -> std::size_t { return tx_.size(); }

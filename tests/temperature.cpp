@@ -5,6 +5,8 @@
 #include <string_view>
 #include <dynamips/macros.h>
 import devices.c7200_iofpga;
+import devices.c7200_midplane;
+import devices.c7200_environment;
 import jit.memory;
 import jit.devices;
 
@@ -144,10 +146,56 @@ fn protocol() -> void {
               {{0x1e840230}, std::endian::big, mem::access_size::word}),
           "unimplemented neighboring registers still fail");
 }
+fn environment_inputs() -> void {
+  dynamips::devices::c7200_environment environment;
+  environment.positive_12 = 111;
+  dynamips::devices::c7200_iofpga io{{}, {}, &environment};
+  dynamips::devices::c7200_midplane midplane{&environment};
+  let &adc = *io.descriptor().endpoint;
+  let &power = *midplane.descriptor().endpoint;
+  const mem::device_access mux{
+      {0x1e840214}, std::endian::big, mem::access_size::word};
+  const mem::device_access sample{
+      {0x1e840257}, std::endian::big, mem::access_size::byte};
+  const let select = [&](unsigned value) {
+    require(adc.write(adc.context, mux, value).has_value(),
+            "select ADC channel");
+  };
+  select(8);
+  for (unsigned i = 0; i < 9; i++)
+    require(adc.read(adc.context, sample) == 111,
+            "ADC exposes configured raw input throughout the nine-sample read");
+  require(power
+              .write(power.context,
+                     {{0x1e800068}, std::endian::big, mem::access_size::word},
+                     1)
+              .has_value(),
+          "disable second supply through midplane");
+  select(0);
+  require(adc.read(adc.context, sample) == 127, "first supply remains active");
+  select(2);
+  require(adc.read(adc.context, sample) == 0,
+          "disabled supply has no ADC voltage");
+  midplane.reset();
+  require(adc.read(adc.context, sample) == 127,
+          "midplane reset restores supply enables");
+  select(4);
+  environment.positive_3v3 = 0;
+  require(adc.read(adc.context, sample) == 0,
+          "faulted rail is observable rather than normalized");
+  select(6);
+  require(!adc.read(adc.context, sample),
+          "unmodeled ADC channels remain unsupported");
+  require(!adc.read(adc.context,
+                    {{0x1e840254}, std::endian::big, mem::access_size::word}) &&
+              !adc.write(adc.context, sample, 0),
+          "neighboring unmodeled ports and ADC writes fail");
+}
 } // namespace
 
 fn main() -> int {
   protocol();
+  environment_inputs();
   std::println("temperature: four sensors, clock edges, thresholds, config, "
                "reset and padding passed");
 }

@@ -43,17 +43,20 @@ their own notices.
 
 Verified on Linux amd64 on 2026-11-14 with a C7200 NPE-400 and IOS
 12.4(24)T5: the guest decompresses its image, hands off to the IOS kernel,
-sets up mappings and prints:
+sets up mappings and reaches an interactive privileged console:
 
 ```text
-Cisco IOS Software, 7200 Software (C7200-ADVENTERPRISEK9-M), Version 12.4(24)T5, RELEASE SOFTWARE (fc3)
+Router#show ip interface brief
+Interface                  IP-Address      OK? Method Status                Protocol
+Router#
 ```
 
-This is a boot checkpoint, not a complete IOS boot, working CLI or network
-validation. Four DS1620 sensors now handle the I/O FPGA temperature protocol.
-The next observed stop is an unmapped access at guest address `0x10000403`,
-guest PC `0x6021ea64`. Missing PCMCIA identification also produces a warning
-before the banner. Cisco images are not distributed here.
+The real-image CLI check enters enable mode, completes `show version` and
+`show ip interface brief`, then stops the emulator cleanly. The configuration
+has empty card slots, so its interface table has no rows. Packet delivery,
+persistent storage and other IOS images remain unvalidated. Erased, unformatted
+bootflash still produces a filesystem warning at startup. Cisco images are not
+distributed here.
 
 | Area | Implemented in the new core | Remaining limits |
 | --- | --- | --- |
@@ -61,13 +64,13 @@ before the banner. Cisco images are not distributed here.
 | IR | Compact 16-byte nodes, bounded storage, readable printing and optimization passes | More lowering and optimization work remains |
 | Memory | CPU-owned segments/privilege and TLB translation, physical regions, big-endian RAM/MMIO, coherent physical RAM writes | Wider CPU models and DMA devices remain |
 | Code dispatch | Native AMD64 blocks, writable guest code, byte-change checks and CACHE maintenance | More profiling and architectural validation needed |
-| Machine | ELF/ZIP loading, bundled ROM, NPE-400 geometry, ROMMON variables | Boot bring-up only; persistence parity is not established |
-| Devices | Queued SCN2681 console/aux, EEPROM reads, FPGA startup registers, four DS1620 sensors, GT64120 PCI configuration and built-in bridges | PCMCIA, DMA, cards and packet delivery remain |
-| Time | CP0 Count/Compare and eligible interrupt delivery at block boundaries | Virtual instruction-based timing, not cycle accuracy |
+| Machine | ELF/ZIP loading, bundled ROM, NPE-400 geometry, bounded ROMMON variable updates, raw Unix console | One console client per run; persistence parity is not established |
+| Devices | SCN2681 console/aux with IRQs, EEPROM, FPGA, DS1620/voltage inputs, Intel bootflash, GT64120 PCI routing and two empty CL-PD6729 sockets | PCMCIA cards, DMA, network cards and packet delivery remain |
+| Time | CP0 Count/Compare, wired-OR device IRQ routing and eligible interrupt delivery at block boundaries | Virtual instruction-based timing; deterministic event scheduling remains |
 
 Translation-cache invalidation revalidates executable backing independently of
 compiled-code reuse; byte comparisons still detect writes through aliases.
-Native outcomes distinguish delivered overflow/syscall, TLB refill/invalid/modified
+Native outcomes distinguish delivered overflow/syscall/breakpoint, TLB refill/invalid/modified
 and address exceptions from host failures and charge only the executed prefix
 and faulting instruction slot. Annulled
 branch-likely delay slots do not advance virtual time. Memory dispatch
@@ -76,7 +79,10 @@ its delay slot still require a budget of at least two. Interpreter and native
 execution share exception entry, including EPC/BD, BadVAddr, Context/XContext,
 EntryHi and refill vectors. Physical bus and unsupported-device failures remain
 explicit emulator errors. Privileged-instruction legality is not complete.
-Deterministic device events and IRQ routing remain migration work. A bounded
+The standalone machine wires the UART to hardware interrupt input 5.
+Deterministic device events remain migration work. Disabled RM7000 PerfControl
+state is modeled; enabling performance counting returns an explicit unsupported
+failure. A bounded
 independent integer interpreter executes cold blocks and provides differential
 checks.
 
@@ -92,11 +98,12 @@ one Linux amd64 host using the
 same IOS 12.4(24)T5 image and CPU 2 measured median launch-to-banner times of
 1.026 s for the new core and 1.111 s for legacy Dynamips (7.7% less time).
 The previous rewrite checkpoint measured 2.89 s. These are host-specific boot
-milestone measurements; CLI readiness and networking remain unvalidated.
+milestone measurements, not measurements of sustained execution or networking.
 A repeat at the MMU/exception checkpoint measured 1.459 s for this core,
 1.255 s for the preceding tiered core and 1.108 s for legacy (seven starts per
-binary, same image and CPU). This correctness checkpoint currently regresses
-boot performance; the earlier speed lead is not a claim about this revision.
+binary, same image and CPU). That correctness checkpoint regressed boot
+performance; the earlier speed lead is not a claim about this revision.
+The interactive-console checkpoint has not been benchmarked against legacy.
 See `benchmarks/README.md` for reproduction commands.
 
 Unsupported operations report typed failures. Reaching the banner does not
@@ -119,6 +126,24 @@ accepted. `--stop-at-handoff` stops before kernel execution; `--budget N` limits
 execution for diagnosis. Without a budget it runs until a stop or failure.
 Use `run:c7200:dev` to run the current development configuration instead.
 
+For an interactive Unix console, start the emulator in one terminal, then
+connect from another. Execution waits for the first console connection:
+
+```sh
+mise run run:c7200 -- --ios /path/to/c7200-ios.zip --console /tmp/c7200.sock
+```
+
+```sh
+python3 tools/console.py /tmp/c7200.sock
+```
+
+Startup can be quiet for several minutes after the banner; a connected terminal
+does not echo input until the guest enables it. Press Enter when IOS requests
+it. The client forwards Ctrl-C to IOS; Ctrl-]
+disconnects the terminal client. Stop the emulator with Ctrl-C in its own
+terminal. This standalone console accepts one connection per run. `--dump-state`
+prints CPU diagnostics on guest exceptions and execution stops.
+
 For development, prepare module consumers and the compilation database, then
 run the focused checks for the behavior being changed:
 
@@ -135,6 +160,16 @@ mise run lint:cpp:jit ::: lint:clangd
 `test:core` covers JIT, memory and device suites; `test:console` uses real Unix
 streams. Run the real IOS command after boot-path changes and record the next
 concrete blocker. A boot does not replace packet, persistence or teardown tests.
+
+The standalone real-image CLI check uses the supplied native executable and
+image, answers the initial setup prompts, and requires completed `show version`
+and `show ip interface brief` commands at `Router#`:
+
+```sh
+python3 tests/ios_cli.py --binary /path/to/c7200-boot --ios /path/to/c7200-ios.zip
+```
+
+Its console transcript and diagnostics are written to `build/ios-cli/`.
 
 `mise run test` builds the legacy libraries and executable, runs registered
 native tests and runs Go tests against freshly installed native archives.
@@ -162,6 +197,15 @@ The DS1620 model uses a fixed 22°C ambient, edge-driven serial communication,
 nine-bit thresholds, sticky alarms and retained nonvolatile settings. START
 performs one synchronous conversion; conversion/EEPROM-write latency and
 continuous conversion scheduling remain unmodeled.
+
+The NPE-400 environment ADC exposes configurable raw voltage inputs with a
+nominal midpoint default. PSU enable bits gate their corresponding inputs;
+conversion latency is not modeled. The CL-PD6729 exposes two empty PCMCIA
+sockets through GT64120 PCI configuration and I/O space. Bootflash models four
+interleaved Intel 28F016SA chips with identification, status, programming and
+block erase. Its erased backing, NVRAM and updated ROMMON variables are volatile
+across process restarts; ROMMON updates survive machine reset. These devices
+do not provide a saved-state or persistent-storage contract yet.
 
 Devices use bounded FIFOs and run service hooks between bounded execution
 slices. MMIO callbacks do not perform host I/O. Asio transport stages bytes and

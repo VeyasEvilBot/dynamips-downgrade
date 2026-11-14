@@ -768,11 +768,12 @@ fn cop0_writes() -> void {
     const let absent = native->run(state, **memory);
     require(!absent && absent.error().code == amd64::error_code::cop0_required,
             "CP0 instructions reject missing state");
-    require(
-        native->run(state, **memory, &cop0).has_value() &&
-            cop0.registers[slot] ==
-                (slot == 7 || slot == 15 || slot == 16 ? 0x1234u : 0x87654321u),
-        "MTC0 stores low 32 bits and preserves read-only registers");
+    require(native->run(state, **memory, &cop0).has_value() &&
+                cop0.registers[slot] == (slot == 7 || slot == 15 || slot == 16
+                                             ? 0x1234u
+                                         : slot == 13 ? 0x8301u
+                                                      : 0x87654321u),
+            "MTC0 stores low 32 bits and preserves read-only registers");
     require(state[2] == static_cast<std::uint64_t>(std::int64_t{
                             static_cast<std::int32_t>(cop0.registers[slot])}),
             "MFC0 sign extends the low word into a guest register");
@@ -826,6 +827,7 @@ fn cop0_full_width() -> void {
             "DMFC0 preserves all bits while MFC0 sign extends the low word");
     const let expected = slot == 7 || slot == 8 || slot == 15 || slot == 16
                              ? 0xfedcba9881234567ULL
+                         : slot == 13               ? 0xfedcba9881234767ULL
                          : slot == 14 || slot == 30 ? state[1]
                                                     : 0x87654321ULL;
     require(
@@ -2327,6 +2329,196 @@ fn syscall_exceptions() -> void {
   }
 }
 
+fn performance_control() -> void {
+  namespace mem = jit::memory;
+  mips::cop0_state direct{};
+  require(
+      mips::cop0_state::performance_control_supported(0x1000) &&
+          mips::cop0_state::performance_control_supported(0x31f) &&
+          !mips::cop0_state::performance_control_supported(0x1400),
+      "only disabled RM7000 performance counter configuration is supported");
+  direct.write(22, 0x1000);
+  require(direct.registers[22] == 0, "PerfControl bit twelve is reserved zero");
+  direct.write(22, 0xfffffbff);
+  require(
+      direct.registers[22] == 0x31f,
+      "PerfControl retains disabled mode/event fields and masks reserved bits");
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create PerfControl compiler");
+  for (const bool optimized : {false, true}) {
+    for (const bool wide : {false, true}) {
+      for (const std::uint32_t control : {0x1000u, 0x131fu, 0x400u, 0x171fu}) {
+        alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+        std::pmr::monotonic_buffer_resource arena{
+            storage.data(), storage.size(), std::pmr::null_memory_resource()};
+        const std::array words{
+            mips::instruction_word{0x24630001},
+            mips::instruction_word{(wide ? 0x40a10000u : 0x40810000u) |
+                                   (22u << 11)},
+            mips::instruction_word{(wide ? 0x40220000u : 0x40020000u) |
+                                   (22u << 11)},
+            mips::instruction_word{0x34040007}};
+        let block = mips::translate(words, {0x1000}, arena);
+        require(block.has_value(), "translate PerfControl transfers");
+        if (optimized)
+          require(
+              ir::optimize(*block, ir::fold_constants, ir::simplify_identities)
+                  .has_value(),
+              "optimize PerfControl transfers");
+        let native = compiler->compile(*block, arena);
+        require(native.has_value(), "compile PerfControl transfers");
+        std::array<std::byte, mem::page_size> ram{};
+        let memory = mem::address_space::create(ram, 0);
+        require(memory.has_value(), "create PerfControl memory");
+        std::array<std::uint64_t, 32> state{};
+        state[1] = 0xabcdef0000000000ULL | control;
+        state[2] = state[4] = 99;
+        mips::cop0_state cop0{};
+        cop0.registers[22] = 0x113;
+        const let result = native->execute(state, **memory, &cop0);
+        if (control & 0x400) {
+          require(!result &&
+                      result.error().code ==
+                          amd64::error_code::unsupported_performance_counter &&
+                      result.error().pc == 0x1004 &&
+                      result.error().instructions == 1 &&
+                      result.error().completed_instructions == 0 &&
+                      cop0.registers[22] == 0x113 && state[3] == 1 &&
+                      state[2] == 99 && state[4] == 99 &&
+                      cop0.registers[9] == 0 && cop0.half_cycle,
+                  "enabled counters fail with a typed precise prefix before "
+                  "mutation");
+        } else {
+          const let expected = control & 0x31f;
+          require(
+              result && result->instructions == 4 &&
+                  result->accounted_instructions == 1 &&
+                  result->next_pc == 0x1010 && cop0.registers[22] == expected &&
+                  state[2] == expected && state[3] == 1 && state[4] == 7,
+              "MFC0/MTC0 and wide forms round-trip disabled PerfControl state");
+        }
+      }
+    }
+  }
+  alignas(std::max_align_t) std::array<std::byte, 16384> storage;
+  std::pmr::monotonic_buffer_resource arena{storage.data(), storage.size(),
+                                            std::pmr::null_memory_resource()};
+  const std::array invalid{mips::instruction_word{0x4003b001}};
+  require(!mips::translate(invalid, {0x1000}, arena),
+          "PerfControl support does not alias unsupported CP0 selectors");
+  for (const std::uint16_t slot : {std::uint16_t{4}, std::uint16_t{20}}) {
+    arena.release();
+    const std::array words{
+        mips::instruction_word{0x40a10000u | (std::uint32_t{slot} << 11)},
+        mips::instruction_word{0x40220000u | (std::uint32_t{slot} << 11)}};
+    let block = mips::translate(words, {0x2000}, arena);
+    require(block.has_value(),
+            "Context registers pass decoder and IR validation");
+    let native = compiler->compile(*block, arena);
+    require(native.has_value(), "compile Context register transfers");
+    std::array<std::uint64_t, 32> state{};
+    state[1] = 0xfedcba9876543210ULL;
+    mips::cop0_state cop0{};
+    cop0.registers[slot] = 0x123456789abcdef0ULL;
+    const std::uint64_t preserve = slot == 4 ? 0x7fffffULL : 0x1ffffffffULL;
+    const let expected =
+        (cop0.registers[slot] & preserve) | (state[1] & ~preserve);
+    std::array<std::byte, mem::page_size> ram{};
+    let memory = mem::address_space::create(ram, 0);
+    require(memory.has_value(), "create Context transfer memory");
+    require(native->execute(state, **memory, &cop0).has_value() &&
+                state[2] == expected,
+            "Context writes preserve hardware BadVPN fields and retain full "
+            "PTE base");
+  }
+}
+
+fn breakpoint_exceptions() -> void {
+  namespace mem = jit::memory;
+  constexpr let rwx =
+      mem::permission::read | mem::permission::write | mem::permission::execute;
+  let compiler = amd64::compiler::create();
+  require(compiler.has_value(), "create breakpoint compiler");
+  require(!ir::is_pure(ir::opcode::breakpoint) &&
+              !ir::produces_value(ir::opcode::breakpoint),
+          "BREAK is an observable fault barrier without a value result");
+  constexpr std::uint64_t pc = 0xffffffff80001000ULL;
+  for (const bool optimized : {false, true}) {
+    for (const bool bev : {false, true}) {
+      for (unsigned scenario = 0; scenario < 6; scenario++) {
+        const bool standalone = scenario == 0;
+        const bool delay = scenario >= 2 && scenario <= 4;
+        const bool annulled = scenario == 3;
+        const bool nested = scenario == 5;
+        alignas(std::max_align_t) std::array<std::byte, 64 * 1024> storage;
+        std::pmr::monotonic_buffer_resource arena{
+            storage.data(), storage.size(), std::pmr::null_memory_resource()};
+        const std::array words{
+            mips::instruction_word{standalone ? 0x0007000du : 0x34030009u},
+            mips::instruction_word{
+                delay ? (scenario == 2 ? 0x10000001u : 0x52200001u)
+                      : 0x03ffffcdu},
+            mips::instruction_word{0x0007000du},
+            mips::instruction_word{0x34040007u}};
+        let block = mips::translate(words, {pc}, arena);
+        require(block && block->info().instruction_count == (standalone ? 1u
+                                                             : delay    ? 3u
+                                                                        : 2u),
+                "BREAK accepts its code field and terminates translation");
+        if (optimized)
+          require(
+              ir::optimize(*block, ir::fold_constants, ir::simplify_identities)
+                  .has_value(),
+              "optimize guarded BREAK");
+        let native = compiler->compile(*block, arena);
+        require(native.has_value(), "compile guarded BREAK");
+        std::array<std::byte, mem::page_size> ram{};
+        let memory = mem::address_space::create(ram, 1);
+        require(memory && (*memory)->map_ram({0x1000}, {0}, rwx).has_value() &&
+                    (*memory)->load_linked<std::uint32_t>({0x1000}).has_value(),
+                "create linked reservation before BREAK");
+        std::array<std::uint64_t, 32> state{};
+        state[17] = annulled ? 1u : 0u;
+        mips::cop0_state cop0;
+        cop0.registers[12] = (bev ? 1u << 22 : 0) | (nested ? 2u : 0);
+        cop0.registers[13] = 0x80008000;
+        cop0.registers[14] = 0xffffffff81234560ULL;
+        const let result = native->execute(state, **memory, &cop0);
+        require(result.has_value(), "execute guarded BREAK");
+        require(result->instructions == (standalone           ? 1u
+                                         : delay && !annulled ? 3u
+                                                              : 2u) &&
+                    state[3] == (standalone ? 0u : 9u) && state[4] == 0,
+                "BREAK reports its exact executed prefix without later writes");
+        if (annulled) {
+          require(result->reason == amd64::exit_reason::completed &&
+                      result->next_pc == pc + 12 && !(cop0.registers[12] & 2) &&
+                      cop0.registers[13] == 0x80008000 &&
+                      cop0.registers[14] == 0xffffffff81234560ULL,
+                  "untaken BEQL annuls a guarded BREAK entirely");
+        } else {
+          require(result->reason == amd64::exit_reason::guest_exception &&
+                      result->next_pc == (bev ? 0xffffffffbfc00380ULL
+                                              : 0xffffffff80000180ULL) &&
+                      (cop0.registers[12] & 2) &&
+                      (cop0.registers[13] & 0x7c) == 9u * 4 &&
+                      (cop0.registers[13] & 0x8000) &&
+                      ((cop0.registers[13] >> 31) & 1) ==
+                          (delay || nested ? 1u : 0u) &&
+                      cop0.registers[14] == (nested ? 0xffffffff81234560ULL
+                                             : standalone ? pc
+                                                          : pc + 4),
+                  "BREAK enters exception nine with precise EPC/BD and nested "
+                  "state");
+        }
+        require((*memory)->store_conditional<std::uint32_t>({0x1000}, 1) ==
+                    annulled,
+                "only an executed BREAK clears the linked reservation");
+      }
+    }
+  }
+}
+
 fn conflicting_code_blocks() -> void {
   namespace mem = jit::memory;
   std::array<std::byte, mem::page_size> ram{};
@@ -3372,6 +3564,7 @@ fn main(int argc, char **argv) -> int {
   immediate_xor();
   cop0_writes();
   cop0_full_width();
+  performance_control();
   byte_stores();
   halfword_accesses();
   signed_byte_loads();
@@ -3399,6 +3592,7 @@ fn main(int argc, char **argv) -> int {
   checked_addition();
   exception_return();
   syscall_exceptions();
+  breakpoint_exceptions();
   conflicting_code_blocks();
   trace_branch_limits();
   host_code_mutations();

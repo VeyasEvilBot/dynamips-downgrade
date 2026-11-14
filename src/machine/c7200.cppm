@@ -16,13 +16,16 @@ inline constexpr std::array windows{
     machine::device_window{"bootflash", {{0x1a000000}, 8 * 1024 * 1024}},
     machine::device_window{"nvram", {{0x1e000000}, 128 * 1024}},
     machine::device_window{"midplane-fpga", {{0x1e800000}, 0x1000}},
-    machine::device_window{"io-fpga", {{0x1e840000}, 0x1000}}};
+    machine::device_window{"io-fpga", {{0x1e840000}, 0x1000}},
+    machine::device_window{"pci-io", {{0x100000000ULL}, 0x1000}}};
 
 export inline constexpr machine::window_id gt64120{0};
 export inline constexpr machine::window_id rom_services{1};
+export inline constexpr machine::window_id bootflash{2};
 export inline constexpr machine::window_id nvram{3};
 export inline constexpr machine::window_id midplane_fpga{4};
 export inline constexpr machine::window_id io_fpga{5};
+export inline constexpr machine::window_id pci_io{6};
 
 // Board images from common/dev_c7200.c.
 export inline constexpr std::array<std::uint16_t, 64> npe400_eeprom{

@@ -1,6 +1,7 @@
 module;
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <span>
@@ -21,6 +22,18 @@ struct pci_bridge_definition {
   bridge_model model;
 };
 enum class bridge_error { capacity, invalid_definition, duplicate_device };
+
+struct pci_function {
+  std::uint8_t root, bus, device, function;
+  void *context;
+  fn (*read)(void *, std::uint8_t) noexcept -> std::uint32_t;
+  fn (*write)(void *, std::uint8_t, std::uint32_t) noexcept -> void;
+};
+enum class pci_function_error {
+  capacity,
+  invalid_definition,
+  duplicate_device
+};
 
 // Startup registers and PCI configuration. DMA engines are not implemented.
 class gt64120 {
@@ -48,6 +61,12 @@ public:
           (value.model != bridge_model::dec21050 &&
            value.model != bridge_model::dec21150))
         return std::unexpected(bridge_error::invalid_definition);
+      for (std::size_t j = 0; j < function_count_; j++) {
+        const let &function = functions_[j];
+        if (function.root == value.root && function.bus == 0 &&
+            function.device == value.device && function.function == 0)
+          return std::unexpected(bridge_error::duplicate_device);
+      }
       for (std::size_t j = 0; j < i; j++)
         if (definitions[j].root == value.root &&
             definitions[j].device == value.device)
@@ -55,6 +74,34 @@ public:
     }
     bridges_ = definitions;
     bridge_bus_ = {};
+    return {};
+  }
+
+  [[nodiscard]] fn
+  configure_functions(std::span<const pci_function> definitions) noexcept
+      -> std::expected<void, pci_function_error> {
+    if (definitions.size() > functions_.size())
+      return std::unexpected(pci_function_error::capacity);
+    for (std::size_t i = 0; i < definitions.size(); i++) {
+      const let &value = definitions[i];
+      if (value.root > 1 || value.device > 31 || value.function > 7 ||
+          !value.context || !value.read || !value.write ||
+          (value.bus == 0 && value.device == 0))
+        return std::unexpected(pci_function_error::invalid_definition);
+      for (const let &bridge : bridges_)
+        if (value.bus == 0 && value.function == 0 &&
+            value.root == bridge.root && value.device == bridge.device)
+          return std::unexpected(pci_function_error::duplicate_device);
+      for (std::size_t j = 0; j < i; j++) {
+        const let &other = definitions[j];
+        if (value.root == other.root && value.bus == other.bus &&
+            value.device == other.device && value.function == other.function)
+          return std::unexpected(pci_function_error::duplicate_device);
+      }
+    }
+    for (std::size_t i = 0; i < definitions.size(); i++)
+      functions_[i] = definitions[i];
+    function_count_ = definitions.size();
     return {};
   }
 
@@ -75,11 +122,20 @@ private:
   std::uint32_t interrupt_mask_ = 0;
   std::span<const pci_bridge_definition> bridges_;
   std::array<std::uint32_t, 8> bridge_bus_{};
+  std::array<pci_function, 8> functions_{};
+  std::size_t function_count_ = 0;
   jit::memory::device endpoint_;
 
   fn pci_read(unsigned root) const noexcept -> std::uint32_t {
     const let address = pci_address_[root];
-    const let reg = address & 255;
+    const let reg = address & 0xfc;
+    for (std::size_t i = 0; i < function_count_; i++) {
+      const let &entry = functions_[i];
+      if (entry.root == root && entry.bus == ((address >> 16) & 255) &&
+          entry.device == ((address >> 11) & 31) &&
+          entry.function == ((address >> 8) & 7))
+        return entry.read(entry.context, static_cast<std::uint8_t>(reg));
+    }
     const let device = (address >> 11) & 31;
     if ((address & 0x00ff0700) != 0)
       return reg == 0 ? 0xffffffffu : 0;
@@ -106,6 +162,16 @@ private:
   }
   fn pci_write(unsigned root, std::uint32_t value) noexcept -> void {
     const let address = pci_address_[root];
+    for (std::size_t i = 0; i < function_count_; i++) {
+      const let &entry = functions_[i];
+      if (entry.root == root && entry.bus == ((address >> 16) & 255) &&
+          entry.device == ((address >> 11) & 31) &&
+          entry.function == ((address >> 8) & 7)) {
+        entry.write(entry.context, static_cast<std::uint8_t>(address & 0xfc),
+                    value);
+        return;
+      }
+    }
     if ((address & 0x00ff07ff) != 0x18)
       return;
     const let device = (address >> 11) & 31;

@@ -40,6 +40,7 @@ enum class error_code {
   hilo_required,
   memory_fault,
   invalid_tlb_state,
+  unsupported_performance_counter,
 };
 
 struct error {
@@ -84,6 +85,8 @@ struct execution_error {
     return "invalid TLB register state";
   case error_code::memory_fault:
     return "guest memory access failed";
+  case error_code::unsupported_performance_counter:
+    return "enabled RM7000 performance counters are unsupported";
   }
   return "native compilation failed";
 }
@@ -443,19 +446,26 @@ private:
     return context->cop0->exception(12, {pc}, delay_slot != 0).value;
   }
 
-  static fn syscall(execution_context *context, std::uint64_t pc,
-                     std::uint32_t delay_slot) noexcept -> std::uint64_t {
+  static fn software_exception(execution_context *context, std::uint64_t pc,
+                                std::uint32_t delay_slot,
+                                std::uint32_t code) noexcept -> std::uint64_t {
     context->memory->clear_reservation();
     if (!(context->cop0->registers[12] & 2))
       context->memory->invalidate();
     context->trap_pc = pc + (delay_slot ? 4 : 0);
-    return context->cop0->exception(8, {pc}, delay_slot != 0).value;
+    return context->cop0->exception(code, {pc}, delay_slot != 0).value;
   }
 
   static fn write_cop0(execution_context *context, std::uint32_t slot,
                         std::uint64_t value, std::uint32_t wide) noexcept
       -> void {
     account_before_external(context);
+    if (slot == 22 &&
+        !mips64::cop0_state::performance_control_supported(value)) {
+      context->failed = true;
+      context->issue = error_code::unsupported_performance_counter;
+      return;
+    }
     const let old_status = context->cop0->registers[12];
     const let old_asid = context->cop0->registers[10] & 255;
     if (wide && (slot == 4 || slot == 20)) {
@@ -651,6 +661,7 @@ public:
             case ir::opcode::read_cop0_64:
             case ir::opcode::read_cop1_64:
             case ir::opcode::syscall:
+            case ir::opcode::breakpoint:
             case ir::opcode::exception_return:
             case ir::opcode::memory_barrier:
             case ir::opcode::tlb_operation:
@@ -1580,7 +1591,8 @@ public:
               return failure(status, i);
             continue;
           }
-          if (node.op == ir::opcode::syscall) {
+          if (node.op == ir::opcode::syscall ||
+              node.op == ir::opcode::breakpoint) {
             uses_cop0 = true;
             const let vector = output.newUInt64();
             if (errors.code)
@@ -1593,14 +1605,16 @@ public:
             if (const let e = checkpoint(node.source_index))
               return failure(e, i);
             if (const let status = output.invoke(
-                    &call, asmjit::Imm{&compiled_block::syscall},
+                    &call, asmjit::Imm{&compiled_block::software_exception},
                     asmjit::FuncSignature::build<
                         std::uint64_t, compiled_block::execution_context *,
-                        std::uint64_t, std::uint32_t>()))
+                        std::uint64_t, std::uint32_t, std::uint32_t>()))
               return failure(status, i);
             call->setArg(0, context);
             call->setArg(1, asmjit::Imm{pc});
             call->setArg(2, asmjit::Imm{delay_slot ? 1 : 0});
+            call->setArg(
+                3, asmjit::Imm{node.op == ir::opcode::breakpoint ? 9u : 8u});
             call->setRet(0, vector);
             if (const let status = finish(vector))
               return failure(status, i);
@@ -1693,6 +1707,9 @@ public:
             call->setArg(2, *value);
             call->setArg(
                 3, asmjit::Imm{node.op == ir::opcode::write_cop0_64 ? 1 : 0});
+            if (node.slot.index == 22)
+              if (const let emitted = check_memory(node))
+                return failure(emitted, i);
             continue;
           }
           if (node.op == ir::opcode::write_state) {
@@ -1857,6 +1874,7 @@ public:
           case ir::opcode::cache_index:
           case ir::opcode::exception_return:
           case ir::opcode::syscall:
+          case ir::opcode::breakpoint:
           case ir::opcode::read_cop1_64:
           case ir::opcode::write_cop1_64:
           case ir::opcode::read_cop0_64:

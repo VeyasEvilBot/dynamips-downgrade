@@ -37,7 +37,7 @@ namespace detail {
 constexpr fn control(mips64::instruction_word word) noexcept -> bool {
   const let op = word.bits >> 26;
   const let function = word.bits & 63;
-  return op == 1 || (op >= 2 && op <= 7) || op == 0x14 || op == 0x15 ||
+  return op == 1 || (op >= 2 && op <= 7) || (op >= 0x14 && op <= 0x17) ||
          (op == 0 && (function == 8 || function == 9));
 }
 
@@ -85,6 +85,8 @@ constexpr fn supported(mips64::instruction_word word) noexcept -> bool {
     return rt <= 3;
   case 6:
   case 7:
+  case 0x16:
+  case 0x17:
     return rt == 0;
   case 0x0f:
     return rs == 0;
@@ -309,15 +311,17 @@ execute(std::span<const mips64::instruction_word> words,
           taken = left != right;
           break;
         case 6:
+        case 0x16:
           taken = std::bit_cast<std::int64_t>(left) <= 0;
           break;
         case 7:
+        case 0x17:
           taken = std::bit_cast<std::int64_t>(left) > 0;
           break;
         default:
           break;
         }
-        likely = op == 0x14 || op == 0x15;
+        likely = op >= 0x14 && op <= 0x17;
       }
       next_pc = taken ? target : pc + 8;
       progress.completed++;

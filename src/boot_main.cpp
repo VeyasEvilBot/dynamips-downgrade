@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
@@ -6,6 +8,8 @@
 #include <limits>
 #include <span>
 #include <charconv>
+#include <chrono>
+#include <memory>
 #include <cstdint>
 #include <exception>
 #include <expected>
@@ -19,8 +23,12 @@
 #include <dynamips/macros.h>
 
 import devices.byte_memory;
+import devices.bootflash;
+import host_memory;
 import devices.c7200_midplane;
+import devices.c7200_environment;
 import devices.gt64120;
+import devices.clpd6729;
 import devices.c7200_iofpga;
 import devices.rom_services;
 import machine.firmware;
@@ -30,6 +38,7 @@ import jit.memory;
 import jit.dispatch;
 import jit.amd64;
 import jit.devices;
+import host.console;
 
 namespace {
 namespace machine = dynamips::machine;
@@ -62,15 +71,25 @@ fn setup_message(machine::setup_issue issue) noexcept -> std::string_view {
 }
 
 template <typename Drain>
-fn flush_output(Drain &&drain) -> std::expected<void, std::error_code> {
+fn flush_output(Drain &&drain,
+                  dynamips::host::console_transport *transport = nullptr,
+                  bool *blocked = nullptr)
+    -> std::expected<void, std::error_code> {
   for (const bool auxiliary : {false, true}) {
     FILE *stream = !auxiliary ? stdout : stderr;
     const let drained =
         drain(auxiliary,
-              [stream, auxiliary](std::span<const std::byte> bytes) noexcept
+              [stream, auxiliary, transport,
+               blocked](std::span<const std::byte> bytes) noexcept
                   -> std::expected<std::size_t, std::error_code> {
                 if (auxiliary)
                   return bytes.size();
+                if (transport) {
+                  const let count = transport->send(bytes);
+                  if (blocked && count != bytes.size())
+                    *blocked = true;
+                  return count;
+                }
                 try {
                   std::print(stream, "{}",
                              std::string_view{
@@ -90,15 +109,94 @@ fn flush_output(Drain &&drain) -> std::expected<void, std::error_code> {
         return std::unexpected(*cause);
       return std::unexpected(std::make_error_code(std::errc::protocol_error));
     }
-    if (!auxiliary && *drained != 0 && std::fflush(stream) != 0)
+    if (!transport && !auxiliary && *drained != 0 && std::fflush(stream) != 0)
       return std::unexpected(std::error_code{errno, std::generic_category()});
   }
   return {};
 }
 
+fn flush_consoles(dynamips::devices::rom_services &services,
+                    dynamips::devices::c7200_iofpga &io,
+                    dynamips::host::console_transport *transport = nullptr,
+                    bool *blocked = nullptr)
+    -> std::expected<void, std::error_code> {
+  const let rom = flush_output(
+      [&services](bool auxiliary, let &&sink) {
+        using dynamips::devices::rom_output;
+        return services.drain(auxiliary ? rom_output::log : rom_output::console,
+                              std::forward<decltype(sink)>(sink));
+      },
+      transport, blocked);
+  if (!rom)
+    return std::unexpected(rom.error());
+  return flush_output(
+      [&io](bool auxiliary, let &&sink) {
+        return io.drain(auxiliary, std::forward<decltype(sink)>(sink));
+      },
+      transport, blocked);
+}
+
+// Service boundaries own all host I/O. Pending bytes stay in their source FIFO
+// until the transport accepts them; slow readers suspend guest execution.
+fn service_console(dynamips::host::console_transport &transport,
+                     dynamips::devices::rom_services &services,
+                     dynamips::devices::c7200_iofpga &io)
+    -> std::expected<bool, std::error_code> {
+  for (;;) {
+    const let polled = transport.poll(
+        std::chrono::milliseconds{transport.pending_output() ? 1 : 0});
+    if (!polled)
+      return std::unexpected(polled.error());
+    if (transport.interrupted())
+      return false;
+    const let accepted = io.receive(transport.received());
+    const let consumed = transport.consume_received(accepted);
+    if (!consumed)
+      return std::unexpected(consumed.error());
+    bool blocked = false;
+    const let flushed = flush_consoles(services, io, &transport, &blocked);
+    if (!flushed)
+      return std::unexpected(flushed.error());
+    const let sent = transport.poll();
+    if (!sent)
+      return std::unexpected(sent.error());
+    if (transport.interrupted())
+      return false;
+    if (!blocked && transport.pending_output() == 0)
+      return true;
+  }
+}
+
+fn dump_cpu(machine::instance &board, dynamips::devices::c7200_iofpga &io,
+              std::optional<std::uint64_t> fault_pc = {}) -> void {
+  const let &cpu = board.cpu();
+  const let code_pc = fault_pc.value_or(cpu.pc.value);
+  std::println(stderr, "CPU PC={:#x} EPC={:#x} code PC={:#x}", cpu.pc.value,
+               cpu.cop0.registers[14], code_pc);
+  let &uart = *io.descriptor().endpoint;
+  const let status = uart.read(
+      uart.context,
+      {{0x1e84042c}, std::endian::big, jit::memory::access_size::byte});
+  if (status)
+    std::println(stderr, "UART ISR={:#x}", *status);
+  std::println(stderr,
+               "Stop Status={:#x} Cause={:#x} Count={:#x} Compare={:#x}",
+               cpu.cop0.registers[12], cpu.cop0.registers[13],
+               cpu.cop0.registers[9], cpu.cop0.registers[11]);
+  for (unsigned i = 0; i < 32; i++)
+    std::println(stderr, "r{}={:#x}", i, cpu.registers[i]);
+  for (unsigned i = 0; i < 32; i++) {
+    const let pc = code_pc - 64 + i * 4;
+    const let word = board.memory().fetch<std::uint32_t>({pc});
+    if (word)
+      std::println(stderr, "{:#x}: {:#010x}", pc, *word);
+  }
+}
+
 fn run(const char *rom_path, const char *ios_path,
          std::optional<std::uint64_t> budget, bool dump_ir,
-         bool stop_at_handoff) -> int {
+         bool stop_at_handoff, std::optional<std::string_view> console_path,
+         bool dump_state) -> int {
   let rom = load(rom_path);
   if (!rom)
     return 1;
@@ -123,12 +221,32 @@ fn run(const char *rom_path, const char *ios_path,
        .iomem_megabytes = 0}};
   std::array<std::byte, 128 * 1024> nvram_bytes{};
   dynamips::devices::byte_memory nvram{{0x1e000000}, nvram_bytes};
-  dynamips::devices::c7200_midplane midplane;
+  let flash_storage = dynamips::host::allocate_aligned(
+      jit::memory::page_size, dynamips::devices::bootflash::size);
+  if (!flash_storage) {
+    std::println(stderr, "boot: flash backing allocation failed: {}",
+                 flash_storage.error().message());
+    return 1;
+  }
+  std::fill_n(flash_storage->get(), dynamips::devices::bootflash::size,
+              static_cast<unsigned char>(0xff));
+  dynamips::devices::bootflash flash{
+      {0x1a000000},
+      std::as_writable_bytes(
+          std::span{flash_storage->get(), dynamips::devices::bootflash::size})};
+  dynamips::devices::c7200_environment environment;
+  dynamips::devices::c7200_midplane midplane{&environment};
   dynamips::devices::c7200_iofpga io{dynamips::c7200::npe400_eeprom,
-                                     dynamips::c7200::vxr_eeprom};
+                                     dynamips::c7200::vxr_eeprom, &environment};
+  dynamips::devices::clpd6729 pcmcia;
   dynamips::devices::gt64120 controller{{0x14000000}};
   if (!controller.configure_bridges(dynamips::c7200::npe400_bridges)) {
     std::println(stderr, "boot: invalid built-in PCI bridge configuration");
+    return 1;
+  }
+  const std::array functions{pcmcia.configuration()};
+  if (!controller.configure_functions(functions)) {
+    std::println(stderr, "boot: invalid PCI function configuration");
     return 1;
   }
   const std::array attachments{
@@ -137,7 +255,9 @@ fn run(const char *rom_path, const char *ios_path,
       machine::attachment{dynamips::c7200::nvram, nvram.descriptor()},
       machine::attachment{dynamips::c7200::midplane_fpga,
                           midplane.descriptor()},
-      machine::attachment{dynamips::c7200::io_fpga, io.descriptor()}};
+      machine::attachment{dynamips::c7200::io_fpga, io.descriptor(), 5},
+      machine::attachment{dynamips::c7200::pci_io, pcmcia.descriptor()},
+      machine::attachment{dynamips::c7200::bootflash, flash.descriptor()}};
   let board = machine::instance::create(
       dynamips::c7200::npe400, *rom, ios ? &*ios : nullptr, attachments,
       stop_at_handoff ? machine::boot_mode::handoff : machine::boot_mode::run);
@@ -153,33 +273,65 @@ fn run(const char *rom_path, const char *ios_path,
                    error.cause.index(), error.item);
     return 1;
   }
+  std::unique_ptr<dynamips::host::console_transport> transport;
+  if (console_path) {
+    let listener =
+        dynamips::host::console_transport::listen(*console_path, true);
+    if (!listener) {
+      std::println(stderr, "boot: cannot listen on {}: {}", *console_path,
+                   listener.error().message());
+      return 1;
+    }
+    transport = std::move(*listener);
+    std::println(stderr, "Console socket: {}", *console_path);
+  }
   const let &model = (*board)->model();
   std::uint64_t executed = 0;
   for (;;) {
+    if (transport) {
+      const let polled = transport->poll(
+          std::chrono::milliseconds{transport->connected() ? 0 : 10});
+      if (!polled) {
+        std::println(stderr, "boot: console I/O failed: {}",
+                     polled.error().message());
+        return 1;
+      }
+      if (transport->interrupted())
+        return 0;
+      if (!transport->connected())
+        continue;
+      const let serviced = service_console(*transport, services, io);
+      if (!serviced) {
+        std::println(stderr, "boot: console I/O failed: {}",
+                     serviced.error().message());
+        return 1;
+      }
+      if (!*serviced)
+        return 0;
+    }
     const let result = (*board)->run_slice(
         budget ? *budget - executed : std::numeric_limits<std::uint64_t>::max(),
         64, dump_ir);
-    if (const let flushed =
-            flush_output([&services](bool auxiliary, let &&sink) {
-              using dynamips::devices::rom_output;
-              return services.drain(auxiliary ? rom_output::log
-                                              : rom_output::console,
-                                    std::forward<decltype(sink)>(sink));
-            });
-        !flushed) {
-      std::println(stderr, "boot: console output failed: {}",
-                   flushed.error().message());
-      return 1;
-    }
-    if (const let flushed = flush_output([&io](bool auxiliary, let &&sink) {
-          return io.drain(auxiliary, std::forward<decltype(sink)>(sink));
-        });
-        !flushed) {
+    if (transport) {
+      const let serviced = service_console(*transport, services, io);
+      if (!serviced) {
+        std::println(stderr, "boot: console I/O failed: {}",
+                     serviced.error().message());
+        return 1;
+      }
+      if (!*serviced)
+        return 0;
+    } else if (const let flushed = flush_consoles(services, io); !flushed) {
       std::println(stderr, "boot: console output failed: {}",
                    flushed.error().message());
       return 1;
     }
     if (!result) {
+      if (dump_state) {
+        const let *guest =
+            std::get_if<jit::dispatch_error>(&result.error().cause);
+        dump_cpu(**board, io, guest ? std::optional{guest->pc} : std::nullopt);
+      }
       if (const let *guest =
               std::get_if<jit::dispatch_error>(&result.error().cause)) {
         const let word = (*board)->memory().fetch<std::uint32_t>({guest->pc});
@@ -218,12 +370,16 @@ fn run(const char *rom_path, const char *ios_path,
     }
     if (budget)
       executed += result->instructions;
+    if (dump_state && result->reason == jit::stop_reason::guest_exception)
+      dump_cpu(**board, io, (*board)->cpu().cop0.registers[14]);
     if (result->reason == jit::stop_reason::yielded ||
         result->reason == jit::stop_reason::guest_exception)
       continue;
     if (result->reason == jit::stop_reason::handoff ||
         result->reason == jit::stop_reason::completed)
       return 0;
+    if (dump_ir || dump_state)
+      dump_cpu(**board, io);
     std::println(
         stderr,
         "boot: instruction budget exhausted at PC {:#x}; increase --budget",
@@ -237,24 +393,42 @@ fn main(int argc, char **argv) -> int {
   try {
     const char *rom = "stable/mips64_microcode";
     const char *ios = nullptr;
+    std::optional<std::string_view> console_path;
     std::optional<std::uint64_t> budget;
     bool dump_ir = false;
+    bool dump_state = false;
     bool stop_at_handoff = false;
     for (int i = 1; i < argc; i++) {
       const std::string_view argument{argv[i]};
       if (argument == "--help") {
         std::println(
             "Usage: c7200-boot [--rom ELF] [--ios ELF_OR_ZIP] [--budget N] "
-            "[--dump-ir] [--stop-at-handoff]\n"
+            "[--console PATH] [--dump-state] [--dump-ir] [--stop-at-handoff]\n"
             "Boot the C7200 ROM and IOS image.\n"
             "Default ROM: stable/mips64_microcode. No instruction limit unless "
             "--budget is set.\n"
+            "--console listens on a raw Unix stream and waits for one client "
+            "before running. Without it, console output goes to stdout.\n"
             "Exit 2 means boot is "
             "blocked or the instruction budget is exhausted.");
         return 0;
       }
+      if (argument == "--console") {
+        if (console_path || i + 1 == argc ||
+            std::string_view{argv[i + 1]}.empty()) {
+          std::println(stderr, "boot: --console requires one socket path");
+          return 1;
+        }
+        i++;
+        console_path = argv[i];
+        continue;
+      }
       if (argument == "--stop-at-handoff") {
         stop_at_handoff = true;
+        continue;
+      }
+      if (argument == "--dump-state") {
+        dump_state = true;
         continue;
       }
       if (argument == "--dump-ir") {
@@ -286,7 +460,8 @@ fn main(int argc, char **argv) -> int {
         budget = limit;
       }
     }
-    return run(rom, ios, budget, dump_ir, stop_at_handoff);
+    return run(rom, ios, budget, dump_ir, stop_at_handoff, console_path,
+               dump_state);
   } catch (const std::exception &error) {
     std::println(stderr, "boot: {}", error.what());
     return 1;

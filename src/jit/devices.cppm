@@ -31,10 +31,20 @@ constexpr fn operator|(widths left, widths right) noexcept -> widths {
                              static_cast<unsigned>(right));
 }
 
+struct interrupt_line {
+  void *context = nullptr;
+  fn (*set_level)(void *, bool) noexcept -> void = nullptr;
+  fn update(bool level) const noexcept -> void {
+    if (set_level)
+      set_level(context, level);
+  }
+};
+
 struct hooks {
   void *context = nullptr;
   fn (*reset)(void *) noexcept -> void = nullptr;
   fn (*service)(void *) noexcept -> std::expected<void, std::error_code> = nullptr;
+  fn (*connect_interrupt)(void *, interrupt_line) noexcept -> void = nullptr;
 };
 
 // The borrowed endpoint returns numeric registers in register_order. The bus

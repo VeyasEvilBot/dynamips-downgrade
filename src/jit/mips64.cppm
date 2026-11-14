@@ -32,7 +32,7 @@ struct guest_address {
 constexpr fn is_branch(instruction_word word) noexcept -> bool {
   const let op = word.bits >> 26;
   return op == 6 || op == 7 || op == 4 || op == 5 || op == 0x14 || op == 0x15 ||
-         (op == 1 && ((word.bits >> 16) & 31) <= 3);
+         op == 0x16 || op == 0x17 || (op == 1 && ((word.bits >> 16) & 31) <= 3);
 }
 
 constexpr fn has_delay_slot(instruction_word word) noexcept -> bool {
@@ -51,6 +51,13 @@ constexpr fn jump_target(instruction_word word, guest_address pc) noexcept
 }
 
 struct cop0_state {
+  static constexpr std::uint32_t performance_control_mask = 0x71f;
+
+  static constexpr fn
+  performance_control_supported(std::uint64_t value) noexcept -> bool {
+    return (value & 0x400) == 0;
+  }
+
   tlb::table translations;
   std::array<std::uint64_t, 32> registers{};
   bool half_cycle = false;
@@ -105,10 +112,15 @@ struct cop0_state {
       value &= 0x01ffe000;
     else if (slot == 2 || slot == 3)
       value &= 0x7fffffff;
+    else if (slot == 22)
+      value &= performance_control_mask;
     else if (slot == 10) {
       registers[slot] = static_cast<std::uint64_t>(
                             std::int64_t{std::bit_cast<std::int32_t>(value)}) &
                         0xc00000ffffffe0ffULL;
+      return;
+    } else if (slot == 13) {
+      registers[13] = (registers[13] & ~std::uint64_t{0x300}) | (value & 0x300);
       return;
     } else if (slot == 4 || slot == 20) {
       const std::uint64_t preserve = slot == 4 ? 0x7fffffULL : 0x1ffffffffULL;
@@ -225,7 +237,8 @@ struct error {
         words[i].bits == 0x42000002 || words[i].bits == 0x42000008 ||
         words[i].bits >> 26 == 0x2f || words[i].bits == 0x42000018 ||
         ((words[i].bits >> 26) == 0 &&
-         ((words[i].bits & 63) == 0x0c || (words[i].bits & 63) == 0x0f))) {
+         ((words[i].bits & 63) == 0x0c || (words[i].bits & 63) == 0x0d ||
+          (words[i].bits & 63) == 0x0f))) {
       words = words.first(i + 1);
       break;
     }
@@ -303,7 +316,8 @@ struct error {
         bits == 0x42000001 || bits == 0x42000002 || bits == 0x42000008;
     const bool eret = bits == 0x42000018;
     const bool sync = opcode == 0 && function == 0x0f;
-    const bool syscall = opcode == 0 && function == 0x0c;
+    const bool software_trap =
+        opcode == 0 && (function == 0x0c || function == 0x0d);
     const bool variable_shift =
         opcode == 0 && (function == 4 || function == 6 || function == 7);
     const bool word_shift =
@@ -350,16 +364,16 @@ struct error {
     const bool indirect = opcode == 0 && (function == 8 || function == 9);
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !dmfc1 && !dmtc1 && !word_shift && !double_shift &&
-        !syscall && !sync && !tlb_operation && !eret && !cache && !hilo_read &&
-        !hilo_write && !addu && !subu && !slt && !sltu && !variable_shift &&
-        !nor && !hilo_arithmetic &&
+        !software_trap && !sync && !tlb_operation && !eret && !cache &&
+        !hilo_read && !hilo_write && !addu && !subu && !slt && !sltu &&
+        !variable_shift && !nor && !hilo_arithmetic &&
         !(opcode == 0 && (function == 0x24 || function == 0x25 ||
                           function == 0x26 || function == 0x2d)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (!immediate && !memory_access && !branch && !jump && !indirect &&
         !mtc0 && !mfc0 && !dmfc1 && !dmtc1 && !word_shift && !double_shift &&
-        !syscall && !sync && !tlb_operation && !eret && !cache && !hilo_read &&
-        !hilo_write && ((bits >> 6) & 31) != 0)
+        !software_trap && !sync && !tlb_operation && !eret && !cache &&
+        !hilo_read && !hilo_write && ((bits >> 6) & 31) != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if ((hilo_read && (rs != 0 || rt != 0 || ((bits >> 6) & 31) != 0)) ||
         (hilo_write && (rt != 0 || rd != 0 || ((bits >> 6) & 31) != 0)))
@@ -379,19 +393,20 @@ struct error {
          (rd != 9 && rd != 11 && rd != 12 && rd != 13 && rd != 15 && rd != 16 &&
           rd != 7 && rd != 8 && rd != 14 && rd != 30 && rd != 0 && rd != 2 &&
           rd != 3 && rd != 4 && rd != 20 && rd != 5 && rd != 6 && rd != 10 &&
-          rd != 28 && rd != 29)))
+          rd != 22 && rd != 28 && rd != 29)))
       return std::unexpected(error{error_code::unsupported_instruction, i});
     if (indirect && (rt != 0 || (function == 8 && rd != 0) ||
                      (function == 9 && rd == rs) || ((bits >> 6) & 31) != 0))
       return std::unexpected(error{error_code::invalid_encoding, i});
-    if ((opcode == 6 || opcode == 7) && rt != 0)
+    if ((opcode == 6 || opcode == 7 || opcode == 0x16 || opcode == 0x17) &&
+        rt != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     if (lui && rs != 0)
       return std::unexpected(error{error_code::invalid_encoding, i});
     const let destination =
         dmfc1 || mfc0 || immediate || memory_access ? rt : rd;
     if (destination == 0 && !memory_access && !branch && !jump && !indirect &&
-        !mtc0 && !dmtc1 && !syscall && !sync && !tlb_operation && !eret &&
+        !mtc0 && !dmtc1 && !software_trap && !sync && !tlb_operation && !eret &&
         !cache && !hilo_write && !addi && !hilo_arithmetic)
       continue;
     const let source = static_cast<std::uint32_t>(i);
@@ -423,8 +438,10 @@ struct error {
         return failed(returned.error());
       continue;
     }
-    if (syscall) {
-      if (let raised = result.append(ir::node::syscall(source)); !raised)
+    if (software_trap) {
+      const let node = function == 0x0d ? ir::node::breakpoint(source)
+                                        : ir::node::syscall(source);
+      if (let raised = result.append(node); !raised)
         return failed(raised.error());
       continue;
     }
@@ -646,8 +663,10 @@ struct error {
       continue;
     }
     if (branch) {
-      const bool sign_branch = opcode == 1 || opcode == 6 || opcode == 7;
-      const bool positive = opcode == 6 || opcode == 7;
+      const bool sign_branch = opcode == 1 || opcode == 6 || opcode == 7 ||
+                               opcode == 0x16 || opcode == 0x17;
+      const bool positive =
+          opcode == 6 || opcode == 7 || opcode == 0x16 || opcode == 0x17;
       const let right = read(sign_branch ? 0 : rt);
       if (!right)
         return failed(right.error());
@@ -664,13 +683,13 @@ struct error {
           std::int64_t{static_cast<std::int16_t>(bits & 0xffff)} * 4;
       const let target =
           start.value + i * 4 + 4 + static_cast<std::uint64_t>(displacement);
-      const bool equal = positive      ? opcode == 6
+      const bool equal = positive      ? opcode == 6 || opcode == 0x16
                          : sign_branch ? (rt & 1) != 0
                                        : opcode == 4 || opcode == 0x14;
       if (let exit = result.set_branch(
               {condition, *right, target, source,
                equal ? ir::branch_kind::equal : ir::branch_kind::not_equal,
-               opcode == 1 ? rt >= 2 : opcode == 0x14 || opcode == 0x15});
+               opcode == 1 ? rt >= 2 : opcode >= 0x14 && opcode <= 0x17});
           !exit)
         return failed(exit.error());
       continue;
@@ -797,7 +816,7 @@ struct error {
                           : immediate         ? ir::binary_kind::bit_or
                           : function == 0x24  ? ir::binary_kind::bit_and
                           : (function == 0x25 || nor) ? ir::binary_kind::bit_or
-                          : function == 0x26 ? ir::binary_kind::bit_xor
+                          : function == 0x26          ? ir::binary_kind::bit_xor
                                              : ir::binary_kind::add_wrap;
     let value = result.append(
         addi ? ir::node::add_checked32(*left, *right, source)

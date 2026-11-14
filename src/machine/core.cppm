@@ -23,6 +23,7 @@ export module machine.core;
 
 import host_memory;
 import machine.firmware;
+import machine.interrupts;
 import jit.memory;
 import jit.devices;
 import jit.mips64;
@@ -68,6 +69,7 @@ struct window_id {
 struct attachment {
   window_id window;
   jit::devices::descriptor device;
+  std::optional<std::uint8_t> interrupt{};
 };
 enum class setup_issue {
   invalid_definition,
@@ -97,6 +99,13 @@ public:
   instance(const instance &) = delete;
   fn operator=(const instance &) -> instance & = delete;
 
+  ~instance() {
+    for (std::size_t i = 0; i < irq_count_; i++) {
+      const let &connection = irq_connections_[i];
+      connection.connect_interrupt(connection.context, {});
+    }
+  }
+
   [[nodiscard]] static fn create(definition model, const firmware::image &rom,
                                   const firmware::image *ios = nullptr,
                                   std::span<const attachment> attachments = {},
@@ -119,8 +128,8 @@ public:
       if (range.size == 0 || range.size % mem::page_size ||
           range.base.value % mem::page_size ||
           range.base.value < model.ram_bytes ||
-          range.base.value >= direct_size ||
-          range.size > direct_size - range.base.value ||
+          range.base.value >= jit::mmu::physical_size ||
+          range.size > jit::mmu::physical_size - range.base.value ||
           (range.base.value < model.rom.base.value + model.rom.size &&
            model.rom.base.value < range.base.value + range.size))
         return std::unexpected(setup_error{setup_issue::invalid_definition, i});
@@ -163,7 +172,9 @@ public:
       for (std::size_t i = 0; i < attachments.size(); i++) {
         const let &entry = attachments[i];
         if (entry.window.value >= model.windows.size() ||
-            (attached & (1u << entry.window.value)))
+            (attached & (1u << entry.window.value)) ||
+            (entry.interrupt && (!entry.device.lifecycle.connect_interrupt ||
+                                 !entry.device.lifecycle.context)))
           return std::unexpected(
               setup_error{setup_issue::invalid_attachment, i});
         attached |= 1u << entry.window.value;
@@ -171,6 +182,15 @@ public:
         const let registered = result->devices_.add(range, entry.device);
         if (!registered)
           return std::unexpected(setup_error{registered.error(), i});
+        if (entry.interrupt) {
+          const let line = result->interrupts_.connect(*entry.interrupt);
+          if (!line)
+            return std::unexpected(
+                setup_error{setup_issue::invalid_attachment, i});
+          const let hooks = entry.device.lifecycle;
+          hooks.connect_interrupt(hooks.context, *line);
+          result->irq_connections_[result->irq_count_++] = hooks;
+        }
         pages += static_cast<std::size_t>(range.size / mem::page_size);
       }
       let space =
@@ -206,6 +226,8 @@ public:
           }
           for (const let &entry : attachments) {
             const let range = model.windows[entry.window.value].range;
+            if (range.base.value >= direct_size)
+              continue;
             for (std::uint64_t offset = 0; offset < range.size;
                  offset += mem::page_size) {
               const let mapped = result->memory_->map_device(
@@ -297,6 +319,7 @@ public:
     memory_->clear_reservation();
     if (!state_.cop0.translations.empty() || (state_.cop0.registers[12] & 0xff))
       memory_->invalidate();
+    interrupts_.reset();
     state_ = {};
     state_.pc = model_.cpu.reset;
     state_.registers[29] = model_.cpu.boot_stack.value;
@@ -336,9 +359,14 @@ private:
                std::unique_ptr<jit::memory_dispatcher>>
       dispatch_;
   jit::mips64::state state_{};
+  interrupt_router interrupts_;
+  std::array<jit::devices::hooks, jit::devices::bus::capacity>
+      irq_connections_{};
+  std::size_t irq_count_ = 0;
   std::optional<std::uint64_t> ios_entry_;
 
-  explicit instance(definition model) noexcept : model_(model) {}
+  explicit instance(definition model) noexcept
+      : model_(model), interrupts_(state_.cop0) {}
 
   static fn translate(void *context, mem::virtual_address address,
                        mem::access_kind access, mem::access_size size) noexcept

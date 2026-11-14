@@ -45,6 +45,7 @@ enum class rom_output : std::uint8_t { console, log };
 class rom_services {
 public:
   static constexpr std::size_t capacity = 1024;
+  static constexpr std::size_t variable_capacity = 64;
 
   explicit rom_services(jit::memory::physical_address base,
                         rom_boot_info boot = {}) noexcept
@@ -86,8 +87,61 @@ private:
   std::uint32_t variable_status_ = 0;
   bool variable_overflow_ = false;
 
+  struct stored_variable {
+    std::array<char, 512> text{};
+    std::size_t name_length = 0;
+    bool used = false;
+  };
+
+  std::array<stored_variable, variable_capacity> variables_{};
+
+  fn set_variable() noexcept -> void {
+    const std::string_view assignment{variable_buffer_.data()};
+    const let equals = assignment.find('=');
+    variable_status_ = std::numeric_limits<std::uint32_t>::max();
+    if (!variable_overflow_ && equals != std::string_view::npos &&
+        equals != 0) {
+      const let name = assignment.substr(0, equals);
+      stored_variable *destination = nullptr;
+      for (let &entry : variables_)
+        if (entry.used &&
+            std::string_view{entry.text.data(), entry.name_length} == name) {
+          destination = &entry;
+          break;
+        }
+      if (!destination)
+        for (let &entry : variables_)
+          if (!entry.used) {
+            destination = &entry;
+            break;
+          }
+      if (destination) {
+        std::ranges::copy(assignment, destination->text.begin());
+        destination->text[assignment.size()] = 0;
+        destination->name_length = equals;
+        destination->used = true;
+        variable_buffer_[equals] = 0;
+        variable_status_ = 0;
+      }
+    }
+    variable_position_ = 0;
+    variable_overflow_ = false;
+  }
+
   fn query_variable() noexcept -> void {
     const std::string_view name{variable_buffer_.data()};
+    if (!variable_overflow_)
+      for (const let &entry : variables_)
+        if (entry.used &&
+            std::string_view{entry.text.data(), entry.name_length} == name) {
+          const std::string_view value{entry.text.data() + entry.name_length +
+                                       1};
+          std::ranges::copy(value, variable_buffer_.begin());
+          variable_buffer_[value.size()] = 0;
+          variable_position_ = 0;
+          variable_status_ = 0;
+          return;
+        }
     const let found =
         std::ranges::find(boot_.variables, name, &rommon_variable::name);
     const bool available = !variable_overflow_ &&
@@ -180,12 +234,15 @@ private:
         self.variable_buffer_[self.variable_position_++] =
             static_cast<char>(word & 255);
         self.variable_buffer_[self.variable_position_] = 0;
-      } else
+      } else if ((word & 255) != 0)
         self.variable_overflow_ = true;
       return {};
     }
     if (offset == 0x58) {
       switch (word & 255) {
+      case 1:
+        self.set_variable();
+        return {};
       case 2:
         self.query_variable();
         return {};

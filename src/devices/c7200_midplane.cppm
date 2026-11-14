@@ -7,13 +7,16 @@ module;
 export module devices.c7200_midplane;
 import jit.devices;
 import jit.memory;
+import devices.c7200_environment;
 
 export namespace dynamips::devices {
 // Empty port-adapter bays. Unpopulated serial EEPROM data lines are pulled
 // high.
 class c7200_midplane {
 public:
-  c7200_midplane() noexcept : endpoint_{this, read, write} {}
+  explicit c7200_midplane(c7200_environment *environment = nullptr) noexcept
+      : environment_(environment ? environment : &owned_environment_),
+        endpoint_{this, read, write} {}
 
   c7200_midplane(const c7200_midplane &) = delete;
   fn operator=(const c7200_midplane &) -> c7200_midplane & = delete;
@@ -33,12 +36,15 @@ public:
     masks_ = {};
     control_ = 0;
     pins_ = {0, 3};
+    environment_->power_enabled = 3;
   }
 
 private:
   std::array<std::uint32_t, 2> masks_{};
   std::uint32_t control_ = 0;
   std::array<std::uint32_t, 2> pins_{0, 3};
+  c7200_environment owned_environment_{};
+  c7200_environment *environment_;
   jit::memory::device endpoint_;
 
   static fn valid_size(jit::memory::access_size size) noexcept -> bool {
@@ -118,6 +124,7 @@ private:
       if ((word & 3) == 0)
         return std::unexpected(jit::memory::device_error::bus);
       self.pins_[1] = word;
+      self.environment_->power_enabled = static_cast<std::uint8_t>(word & 3);
       return {};
     default:
       const let known = read(context, access);

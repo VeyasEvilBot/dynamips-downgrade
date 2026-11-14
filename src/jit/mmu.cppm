@@ -8,6 +8,7 @@ import jit.mips64;
 import jit.tlb;
 
 export namespace jit::mmu {
+inline constexpr std::uint64_t physical_size = std::uint64_t{1} << 36;
 enum class privilege : std::uint8_t { kernel, supervisor, user };
 
 constexpr fn current_privilege(std::uint64_t status) noexcept -> privilege {
@@ -69,7 +70,7 @@ translate(const mips64::cop0_state &cpu, memory::virtual_address address,
     const let region = va >> 62;
     constexpr std::uint64_t offset_mask = (std::uint64_t{1} << 40) - 1;
     if (region == 2) {
-      constexpr std::uint64_t physical_mask = (std::uint64_t{1} << 36) - 1;
+      constexpr std::uint64_t physical_mask = physical_size - 1;
       if (!kernel || (va & 0x07fffff000000000ULL))
         return failure(memory::fault_reason::address_error);
       return memory::physical_address{va & physical_mask};
