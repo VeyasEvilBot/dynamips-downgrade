@@ -105,3 +105,21 @@ The full-startup profile found repeated Asio console polls during silent guest
 execution: up to five polls per 64-block CPU slice. Host console input now polls
 at most once per millisecond when idle; pending output bypasses that cadence.
 Guest instruction accounting and the CP0 clock model are unchanged.
+
+Three runs per core on the same host, pinned to CPU 2, using the same IOS
+12.4(24)T5 ELF and NPE-400/256 MiB configuration gave these medians:
+
+| Core | Launch → Router> | Banner → Router> | Child CPU time |
+| --- | ---: | ---: | ---: |
+| Before polling fix | 192.845 s | 186.364 s | 170.647 s |
+| Fixed native CLI | 46.123 s | 44.861 s | 45.187 s |
+| Legacy | 16.076 s | 14.706 s | 13.587 s |
+
+These are full CLI-startup observations, not the earlier launch-to-banner
+benchmark. The shared host had variable load (the baseline launch samples ranged
+from 171.7 to 250.4 s, including concurrent build activity); do not treat the
+76% median wall-time reduction as a precision throughput measurement. The CPU
+samples also fell substantially. Legacy remains faster at this checkpoint.
+A separate sampled run attributed about 52% of baseline CPU time to console
+servicing. A Count-trace experiment passed semantic tests but did not show a
+useful startup CPU-time improvement and is not included in this change.

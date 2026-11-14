@@ -64,7 +64,7 @@ distributed here.
 | IR | Compact 16-byte nodes, bounded storage, readable printing and optimization passes | More lowering and optimization work remains |
 | Memory | CPU-owned segments/privilege and TLB translation, physical regions, big-endian RAM/MMIO, coherent physical RAM writes | Wider CPU models and DMA devices remain |
 | Code dispatch | Native AMD64 blocks, writable guest code, byte-change checks and CACHE maintenance | More profiling and architectural validation needed |
-| Machine | ELF/ZIP loading, bundled ROM, NPE-400 geometry, bounded ROMMON variable updates, raw Unix console | One console client per run; persistence parity is not established |
+| Machine | ELF/ZIP loading, bundled ROM, NPE-400 geometry, bounded ROMMON variable updates, direct terminal and optional Unix console | One console client per run; persistence parity is not established |
 | Devices | SCN2681 console/aux with IRQs, EEPROM, FPGA, DS1620/voltage inputs, Intel bootflash, GT64120 PCI routing and two empty CL-PD6729 sockets | PCMCIA cards, DMA, network cards and packet delivery remain |
 | Time | CP0 Count/Compare, wired-OR device IRQ routing and eligible interrupt delivery at block boundaries | Virtual instruction-based timing; deterministic event scheduling remains |
 
@@ -103,7 +103,12 @@ A repeat at the MMU/exception checkpoint measured 1.459 s for this core,
 1.255 s for the preceding tiered core and 1.108 s for legacy (seven starts per
 binary, same image and CPU). That correctness checkpoint regressed boot
 performance; the earlier speed lead is not a claim about this revision.
-The interactive-console checkpoint has not been benchmarked against legacy.
+A three-run, CPU-pinned comparison of this CLI stack measured median launch to
+`Router>` of 192.8 s before the polling fix, 46.1 s after, and 16.1 s for legacy.
+Median banner-to-prompt times were 186.4 s, 44.9 s and 14.7 s respectively.
+This reduces the observed startup delay by about 76%; legacy remains faster.
+The shared host had variable load, so these are checkpoint observations, not a
+general throughput claim. Guest instruction accounting and Count timing are unchanged.
 See `benchmarks/README.md` for reproduction commands.
 
 Unsupported operations report typed failures. Reaching the banner does not
@@ -117,20 +122,29 @@ the other declared dependencies, including AsmJit, Asio, zlib and minizip.
 The new native backend currently targets Linux amd64.
 
 ```nu
-mise run run:c7200 -- --ios /path/to/c7200-ios.zip
+mise run run:ios -- /path/to/c7200-ios.zip
 ```
 
 This task builds an isolated release profile in `tools/boot-release`, leaving
 the development configuration available for clangd. ELF images are also
 accepted. `--stop-at-handoff` stops before kernel execution; `--budget N` limits
 execution for diagnosis. Without a budget it runs until a stop or failure.
-Use `run:c7200:dev` to run the current development configuration instead.
+Use `run:ios:dev` to run the current development configuration instead.
+`c7200-boot` and `run:c7200` remain diagnostic compatibility entry points;
+`jit-playground` is a development fixture. The legacy `dynamips` executable
+and the public Go bindings retain their existing behavior.
 
-For an interactive Unix console, start the emulator in one terminal, then
+The production CLI uses CLI11 and a thin command frontend over the native
+runner. It opens the current terminal directly, without a socket or helper
+process. Ctrl-C goes to IOS and Ctrl-] exits while restoring the terminal.
+The Go/native embedding path remains separate from CLI parsing; no IPC service
+or new binding contract is introduced.
+
+For an optional Unix console, start the emulator in one terminal, then
 connect from another. Execution waits for the first console connection:
 
 ```sh
-mise run run:c7200 -- --ios /path/to/c7200-ios.zip --console /tmp/c7200.sock
+mise run run:ios -- /path/to/c7200-ios.zip --console /tmp/c7200.sock
 ```
 
 ```sh
@@ -151,6 +165,7 @@ run the focused checks for the behavior being changed:
 mise run compiledb
 mise run test:core
 mise run test:console
+mise run test:cli
 mise run test:machine
 mise run test:boot
 mise run lint:cpp:jit ::: lint:clangd
@@ -404,16 +419,3 @@ rules cannot be disabled through the configuration.
 
 The published Go tool still reads `.repolint.toml`. The architecture checker
 needs a repolint release before its rules can join the published-tool CI gate.
-
-The standalone diagnostic frontend also supports a direct terminal console:
-
-```sh
-mise run run:c7200 -- --ios /path/to/c7200-ios.zip --stdio
-```
-
-This uses the existing native Asio transport and FD duplication helpers, with no
-socket or external client. Ctrl-C is forwarded to IOS; Ctrl-] exits and restores
-the terminal. Noninteractive pipes retain binary data and output after input EOF.
-The CLI-free `boot.application` runner is shared by frontend entry points; machine
-execution remains in the native core. Existing Go and legacy C ABI consumers are
-unchanged.
