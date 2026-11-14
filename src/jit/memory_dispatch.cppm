@@ -19,6 +19,7 @@ import jit.memory;
 import jit.amd64;
 import jit.interpreter;
 import jit.exceptions;
+import jit.count_batch;
 
 export namespace jit {
 // One owner. Exact source validation permits writable code and physical
@@ -98,6 +99,16 @@ public:
           return fetch_failure(state, compiled.error(), result, budget);
         result.compiled += *compiled;
       }
+      if (entry.count_pattern && count_source_disjoint(entry, state) &&
+          count_tail_complete(pc)) {
+        if (const let batch = count_batch::run(*entry.count_pattern, state,
+                                               budget - result.instructions,
+                                               block_limit - result.blocks)) {
+          result.instructions += batch->instructions;
+          result.blocks += batch->blocks;
+          continue;
+        }
+      }
       if (entry.cold && entry.hits++ >= cold_threshold_ - 1) {
         let warmed =
             compile(entry, pc, dump_ir,
@@ -107,7 +118,8 @@ public:
           return std::unexpected(warmed.error());
         result.compiled += *warmed;
       }
-      if (!entry.cold && !entry.tracing_attempted && entry.hits++ >= 2047 &&
+      if (!entry.cold && !entry.tracing_attempted &&
+          memory_.may_speculate_translation() && entry.hits++ >= 2047 &&
           budget - result.instructions >= 64 &&
           block_limit - result.blocks > 1) {
         entry.tracing_attempted = true;
@@ -235,9 +247,12 @@ private:
     std::array<std::uint64_t, 2> versions{};
     std::array<memory::backing_stamp, 2> stamps{};
     std::uint32_t instructions = 0;
+    std::uint32_t source_words = 0;
+    std::optional<count_batch::loop> count_pattern{};
     std::uint16_t hits = 0;
     bool tracing_attempted = false;
     bool cold = false;
+    bool speculative_source = false;
     std::array<cached_block *, 2> successors{};
     std::array<mips64::instruction_word, 65> source{};
     std::array<std::span<const std::byte>, 2> source_ranges{};
@@ -312,6 +327,36 @@ private:
     return successor;
   }
 
+  // A prior short slice can leave the four-slot tail split into more blocks.
+  [[nodiscard]] fn count_tail_complete(std::uint64_t pc) const noexcept
+      -> bool {
+    const let tail = pc + 4;
+    const let index =
+        ((tail >> 2) ^ (tail >> 14) ^ (tail >> 26)) & (cache_sets - 1);
+    for (const let &entry : cache_[index].entries)
+      if ((entry.code || entry.cold) && entry.pc == tail)
+        return entry.instructions >= 4;
+    return true;
+  }
+
+  [[nodiscard]] static inline fn
+  count_source_disjoint(const cached_block &entry,
+                        const mips64::state &state) noexcept -> bool {
+    const let begin = reinterpret_cast<std::uintptr_t>(&state);
+    if (sizeof(state) > UINTPTR_MAX - begin)
+      return false;
+    const let end = begin + sizeof(state);
+    for (const let range : entry.source_ranges) {
+      if (range.empty())
+        continue;
+      const let source = reinterpret_cast<std::uintptr_t>(range.data());
+      if (range.size() > UINTPTR_MAX - source ||
+          (source < end && begin < source + range.size()))
+        return false;
+    }
+    return true;
+  }
+
   [[nodiscard]] inline fn validated(const cached_block &entry) const noexcept
       -> bool {
     return entry.validated_slice == slice_ ||
@@ -321,6 +366,8 @@ private:
   [[gnu::always_inline]] fn valid(cached_block &entry,
                                    std::uint64_t pc) noexcept -> bool {
     if ((!entry.code && !entry.cold) || entry.pc != pc)
+      return false;
+    if (entry.speculative_source && !memory_.may_speculate_translation())
       return false;
     if (entry.generation == memory_.mapping_generation() && validated(entry) &&
         entry.external_generation == memory_.external_generation() &&
@@ -337,7 +384,7 @@ private:
       const let first = memory_.executable_tail({pc});
       if (!first || first->data() != entry.source_ranges[0].data())
         return false;
-      if (entry.instructions * 4 > first->size()) {
+      if (entry.source_words * 4 > first->size()) {
         const let second = memory_.executable_tail({pc + first->size()});
         if (!second || second->data() != entry.source_ranges[1].data())
           return false;
@@ -351,7 +398,7 @@ private:
         entry.versions == versions)
       return true;
     const let bytes =
-        std::as_bytes(std::span{entry.source}).first(entry.instructions * 4);
+        std::as_bytes(std::span{entry.source}).first(entry.source_words * 4);
     const let first = std::min(
         bytes.size(), memory::page_size - (pc & (memory::page_size - 1)));
     const bool unchanged =
@@ -449,15 +496,36 @@ private:
     if (!first)
       return std::unexpected(
           dispatch_error{dispatch_error_code::memory, pc, first.error()});
+    std::optional<count_batch::loop> count_pattern;
+    if (memory_.may_speculate_translation() && instructions == 1 &&
+        pc <= UINT64_MAX - 16 &&
+        (words[0].bits & ~(31u << 16)) == 0x40004800u) {
+      bool available = true;
+      for (std::size_t i = 1; i < 5; i++) {
+        const let backing = memory_.executable_tail({pc + i * 4});
+        if (!backing || backing->size() < 4) {
+          available = false;
+          break;
+        }
+        std::uint32_t bits;
+        std::memcpy(&bits, backing->data(), sizeof(bits));
+        words[i] = {std::endian::native == std::endian::little
+                        ? std::byteswap(bits)
+                        : bits};
+      }
+      if (available)
+        count_pattern = count_batch::decode(std::span{words}.first(5));
+    }
+    const let source_words = count_pattern ? 5u : instructions;
     std::array<const std::byte *, 2> host{first->data(), nullptr};
-    if (instructions * 4 > first->size()) {
+    if (source_words * 4 > first->size()) {
       const let second = memory_.executable_tail({pc + first->size()});
       if (!second)
         return std::unexpected(dispatch_error{
             dispatch_error_code::memory, pc + first->size(), second.error()});
       host[1] = second->data();
     }
-    const let bytes = instructions * 4;
+    const let bytes = source_words * 4;
     const let first_bytes = std::min<std::size_t>(bytes, first->size());
     entry.source_ranges = {std::span{host[0], first_bytes},
                            std::span{host[1], bytes - first_bytes}};
@@ -469,8 +537,11 @@ private:
     entry.tracing_attempted = trace;
     entry.generation = memory_.mapping_generation();
     entry.instructions = instructions;
+    entry.source_words = source_words;
+    entry.count_pattern = count_pattern;
+    entry.speculative_source = trace || count_pattern.has_value();
     entry.cold = cold;
-    for (std::size_t i = 0; i < instructions; i++) {
+    for (std::size_t i = 0; i < source_words; i++) {
       const let bits = words[i].bits;
       entry.source[i].bits = std::endian::native == std::endian::little
                                  ? std::byteswap(bits)

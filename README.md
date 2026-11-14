@@ -97,7 +97,11 @@ execution session; fault and exception metadata is decoded on those exits.
 The standalone machine owns its RAM and routes runtime writes through the memory
 APIs, allowing reuse of validated page versions across execution slices. Borrowed
 backing is checked between slices, and opaque callbacks require a fresh proof.
-The CPU MMU translation callback explicitly preserves guest state.
+The CPU MMU translation callback explicitly preserves guest state. Exact decoded
+Count-wait loops can execute in batches bounded by the existing instruction,
+block and Compare limits; other instruction streams retain the ordinary tiers.
+Speculative discovery requires a guest-state-preserving translation contract.
+
 
 
 Before the MMU/exception refactor, seven alternating process starts per core on

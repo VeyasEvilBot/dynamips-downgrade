@@ -230,6 +230,12 @@ public:
     return {std::span{write_versions_}.subspan(first, last - first + 1)};
   }
 
+  // Speculative code discovery must never invoke opaque guest-state effects.
+  [[nodiscard]] inline fn may_speculate_translation() const noexcept -> bool {
+    return !translate_ ||
+           translation_effect_ == translation_effect::guest_state_preserving;
+  }
+
   // The translation owner and returned backing outlive this address space.
   fn set_translation(
       void *context, translation_callback callback,
