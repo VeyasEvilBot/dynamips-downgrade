@@ -140,13 +140,18 @@ fn flush_consoles(dynamips::devices::rom_services &services,
 // until the transport accepts them; slow readers suspend guest execution.
 fn service_console(dynamips::host::console_transport &transport,
                      dynamips::devices::rom_services &services,
-                     dynamips::devices::c7200_iofpga &io)
+                     dynamips::devices::c7200_iofpga &io,
+                     std::chrono::steady_clock::time_point &next_poll)
     -> std::expected<bool, std::error_code> {
   for (;;) {
-    const let polled = transport.poll(
-        std::chrono::milliseconds{transport.pending_output() ? 1 : 0});
-    if (!polled)
-      return std::unexpected(polled.error());
+    const let now = std::chrono::steady_clock::now();
+    if (now >= next_poll || transport.pending_output()) {
+      const let polled = transport.poll(
+          std::chrono::milliseconds{transport.pending_output() ? 1 : 0});
+      if (!polled)
+        return std::unexpected(polled.error());
+      next_poll = now + std::chrono::milliseconds{1};
+    }
     if (transport.interrupted())
       return false;
     const let accepted = io.receive(transport.received());
@@ -157,11 +162,6 @@ fn service_console(dynamips::host::console_transport &transport,
     const let flushed = flush_consoles(services, io, &transport, &blocked);
     if (!flushed)
       return std::unexpected(flushed.error());
-    const let sent = transport.poll();
-    if (!sent)
-      return std::unexpected(sent.error());
-    if (transport.interrupted())
-      return false;
     if (!blocked && transport.pending_output() == 0)
       return true;
   }
@@ -287,10 +287,10 @@ fn run(const char *rom_path, const char *ios_path,
   }
   const let &model = (*board)->model();
   std::uint64_t executed = 0;
+  std::chrono::steady_clock::time_point next_console_poll{};
   for (;;) {
-    if (transport) {
-      const let polled = transport->poll(
-          std::chrono::milliseconds{transport->connected() ? 0 : 10});
+    if (transport && !transport->connected()) {
+      const let polled = transport->poll(std::chrono::milliseconds{10});
       if (!polled) {
         std::println(stderr, "boot: console I/O failed: {}",
                      polled.error().message());
@@ -300,20 +300,13 @@ fn run(const char *rom_path, const char *ios_path,
         return 0;
       if (!transport->connected())
         continue;
-      const let serviced = service_console(*transport, services, io);
-      if (!serviced) {
-        std::println(stderr, "boot: console I/O failed: {}",
-                     serviced.error().message());
-        return 1;
-      }
-      if (!*serviced)
-        return 0;
     }
     const let result = (*board)->run_slice(
         budget ? *budget - executed : std::numeric_limits<std::uint64_t>::max(),
         64, dump_ir);
     if (transport) {
-      const let serviced = service_console(*transport, services, io);
+      const let serviced =
+          service_console(*transport, services, io, next_console_poll);
       if (!serviced) {
         std::println(stderr, "boot: console I/O failed: {}",
                      serviced.error().message());

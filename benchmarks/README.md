@@ -81,3 +81,27 @@ Timing includes process startup and ends at the IOS banner, not a working CLI.
 The cold interpreter avoids compiling one-off blocks. Bounded native traces,
 checked RAM probes and successor lookup hints reduce execution overhead;
 every hinted successor still undergoes normal code/mapping validation.
+
+## IOS console readiness
+
+Use the same extracted image and CPU affinity for full startup comparisons.
+This harness requires the actual `Router>` prompt and records launch, banner,
+RETURN, prompt, child CPU time, image hash and console logs under
+`build/cli-bench/`. It uses NPE-400 with 256 MiB RAM and empty card slots.
+
+```sh
+python3 benchmarks/cli.py /path/to/legacy/dynamips --core legacy \
+  --image /path/to/c7200.image --label legacy --cpu 2 --runs 3
+python3 benchmarks/cli.py /path/to/c7200-boot --core boot \
+  --image /path/to/c7200.image --label new --cpu 2 --runs 3
+```
+
+Use `--core cli` for the convenience CLI's `run IMAGE --console PATH` syntax.
+The harness terminates each emulator after the prompt; it does not validate
+networking, saved state or legacy teardown. Run timing separately from profiling
+and compilation. Shared-host scheduling and CPU frequency still affect results.
+
+The full-startup profile found repeated Asio console polls during silent guest
+execution: up to five polls per 64-block CPU slice. Host console input now polls
+at most once per millisecond when idle; pending output bypasses that cadence.
+Guest instruction accounting and the CP0 clock model are unchanged.
