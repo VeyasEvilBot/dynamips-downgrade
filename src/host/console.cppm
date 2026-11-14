@@ -4,6 +4,10 @@ module;
 #include <asio/error.hpp>
 #include <asio/io_context.hpp>
 #include <asio/local/stream_protocol.hpp>
+#include <asio/posix/stream_descriptor.hpp>
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
 #include <asio/signal_set.hpp>
 #include <algorithm>
 #include <array>
@@ -22,6 +26,7 @@ module;
 #include <span>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #include <dynamips/macros.h>
 
@@ -100,6 +105,69 @@ public:
       if (error)
         return std::unexpected(error);
       static_cast<void>(descriptor.release());
+      result->connected_ = true;
+      return result;
+    } catch (const std::bad_alloc &) {
+      return std::unexpected(
+          std::make_error_code(std::errc::not_enough_memory));
+    } catch (const std::system_error &error) {
+      return std::unexpected(error.code());
+    }
+  }
+
+  [[nodiscard]] static fn terminal(bool process_signals = false,
+                                    int input = STDIN_FILENO,
+                                    int output = STDOUT_FILENO) noexcept
+      -> std::expected<std::unique_ptr<console_transport>, std::error_code> {
+    let read_fd = duplicate_fd(input);
+    if (!read_fd)
+      return std::unexpected(read_fd.error());
+    let write_fd = duplicate_fd(output);
+    if (!write_fd)
+      return std::unexpected(write_fd.error());
+    const int read_flags = ::fcntl(read_fd->get(), F_GETFL, 0);
+    const int write_flags = ::fcntl(write_fd->get(), F_GETFL, 0);
+    if (read_flags < 0 || write_flags < 0)
+      return std::unexpected(std::error_code{errno, std::generic_category()});
+    try {
+      let result = std::unique_ptr<console_transport>{new console_transport};
+      std::error_code error;
+      result->terminal_mode_ = true;
+      result->input_.assign(read_fd->get(), error);
+      if (error)
+        return std::unexpected(error);
+      static_cast<void>(read_fd->release());
+      result->input_flags_ = read_flags;
+      result->output_.assign(write_fd->get(), error);
+      if (error)
+        return std::unexpected(error);
+      static_cast<void>(write_fd->release());
+      result->output_flags_ = write_flags;
+      if (::isatty(result->input_.native_handle())) {
+        if (::tcgetattr(result->input_.native_handle(), &result->attributes_) <
+            0)
+          return std::unexpected(
+              std::error_code{errno, std::generic_category()});
+        let raw = result->attributes_;
+        ::cfmakeraw(&raw);
+        if (::tcsetattr(result->input_.native_handle(), TCSANOW, &raw) < 0)
+          return std::unexpected(
+              std::error_code{errno, std::generic_category()});
+        result->interactive_ = true;
+      }
+      if (process_signals) {
+        error = result->signals_.add(SIGINT, error);
+        if (error)
+          return std::unexpected(error);
+        error = result->signals_.add(SIGTERM, error);
+        if (error)
+          return std::unexpected(error);
+        result->signals_.async_wait(
+            [self = result.get()](std::error_code status, int) noexcept {
+              if (!status)
+                self->interrupted_ = true;
+            });
+      }
       result->connected_ = true;
       return result;
     } catch (const std::bad_alloc &) {
@@ -191,6 +259,10 @@ private:
   asio::local::stream_protocol::acceptor acceptor_{context_};
   asio::local::stream_protocol::socket socket_{context_};
   asio::signal_set signals_{context_};
+  asio::posix::stream_descriptor input_{context_}, output_{context_};
+  struct termios attributes_{};
+  int input_flags_ = -1, output_flags_ = -1;
+  bool terminal_mode_ = false, interactive_ = false;
   std::filesystem::path path_;
   struct stat path_identity_{};
   std::size_t rx_head_ = 0, rx_size_ = 0;
@@ -224,35 +296,51 @@ private:
     }
     if (!reading_ && !input_closed_ && rx_size_ == 0) {
       reading_ = true;
-      socket_.async_read_some(
-          asio::buffer(rx_),
-          [this](std::error_code error, std::size_t count) noexcept {
-            reading_ = false;
-            if (stopping_)
-              return;
-            rx_head_ = 0;
-            rx_size_ = count;
-            if (error == asio::error::eof)
-              input_closed_ = true;
-            else if (error)
-              failure_ = error;
-          });
+      let completed = [this](std::error_code error,
+                              std::size_t count) noexcept {
+        reading_ = false;
+        if (stopping_)
+          return;
+        rx_head_ = 0;
+        rx_size_ = count;
+        if (interactive_) {
+          const let escape = std::find(
+              rx_.begin(), rx_.begin() + static_cast<std::ptrdiff_t>(count),
+              std::byte{0x1d});
+          if (escape != rx_.begin() + static_cast<std::ptrdiff_t>(count)) {
+            rx_size_ = static_cast<std::size_t>(escape - rx_.begin());
+            interrupted_ = true;
+          }
+        }
+        if (error == asio::error::eof)
+          input_closed_ = true;
+        else if (error)
+          failure_ = error;
+      };
+      if (terminal_mode_)
+        input_.async_read_some(asio::buffer(rx_), std::move(completed));
+      else
+        socket_.async_read_some(asio::buffer(rx_), std::move(completed));
     }
     if (!writing_ && tx_size_ != 0) {
       writing_ = true;
-      socket_.async_write_some(
-          asio::buffer(tx_.data() + tx_head_, tx_size_),
-          [this](std::error_code error, std::size_t count) noexcept {
-            writing_ = false;
-            if (stopping_)
-              return;
-            tx_head_ += count;
-            tx_size_ -= count;
-            if (tx_size_ == 0)
-              tx_head_ = 0;
-            if (error)
-              failure_ = error;
-          });
+      let completed = [this](std::error_code error,
+                              std::size_t count) noexcept {
+        writing_ = false;
+        if (stopping_)
+          return;
+        tx_head_ += count;
+        tx_size_ -= count;
+        if (tx_size_ == 0)
+          tx_head_ = 0;
+        if (error)
+          failure_ = error;
+      };
+      const let bytes = asio::buffer(tx_.data() + tx_head_, tx_size_);
+      if (terminal_mode_)
+        output_.async_write_some(bytes, std::move(completed));
+      else
+        socket_.async_write_some(bytes, std::move(completed));
     }
   }
 
@@ -261,6 +349,24 @@ private:
       return {};
     stopping_ = true;
     std::error_code first, error;
+    if (terminal_mode_) {
+      if (interactive_ &&
+          ::tcsetattr(input_.native_handle(), TCSANOW, &attributes_) < 0)
+        first = {errno, std::generic_category()};
+      if (input_flags_ >= 0 &&
+          ::fcntl(input_.native_handle(), F_SETFL, input_flags_) < 0 && !first)
+        first = {errno, std::generic_category()};
+      if (output_flags_ >= 0 &&
+          ::fcntl(output_.native_handle(), F_SETFL, output_flags_) < 0 &&
+          !first)
+        first = {errno, std::generic_category()};
+      error = input_.close(error);
+      if (error && !first)
+        first = error;
+      error = output_.close(error);
+      if (error && !first)
+        first = error;
+    }
     error = acceptor_.close(error);
     if (error)
       first = error;

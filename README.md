@@ -404,3 +404,16 @@ rules cannot be disabled through the configuration.
 
 The published Go tool still reads `.repolint.toml`. The architecture checker
 needs a repolint release before its rules can join the published-tool CI gate.
+
+The standalone diagnostic frontend also supports a direct terminal console:
+
+```sh
+mise run run:c7200 -- --ios /path/to/c7200-ios.zip --stdio
+```
+
+This uses the existing native Asio transport and FD duplication helpers, with no
+socket or external client. Ctrl-C is forwarded to IOS; Ctrl-] exits and restores
+the terminal. Noninteractive pipes retain binary data and output after input EOF.
+The CLI-free `boot.application` runner is shared by frontend entry points; machine
+execution remains in the native core. Existing Go and legacy C ABI consumers are
+unchanged.
