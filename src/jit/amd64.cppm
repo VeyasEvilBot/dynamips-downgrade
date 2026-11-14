@@ -109,7 +109,58 @@ struct trace_region {
 };
 
 class compiled_block {
+  struct execution_context {
+    memory::address_space *const memory;
+    mips64::cop0_state *const cop0;
+    mips64::hilo_state *const hilo;
+    mips64::cop1_state *const cop1;
+    memory::write_monitor writes{};
+    const memory::cache_entry *const read_cache = nullptr;
+    std::uint32_t executed_slots = 0;
+    std::uint32_t instruction_base = 0;
+    std::uint32_t effect_prefix = 0;
+    std::uint32_t accounted = 0;
+    std::uint32_t executed_blocks = 0;
+    std::uint32_t block_limit = 1;
+    std::uint32_t region = 0;
+    std::uint64_t budget = UINT64_MAX;
+    std::uint64_t cycle_limit = UINT64_MAX;
+    std::optional<std::uint64_t> trap_pc{};
+    memory::fault fault{};
+    bool annulled_slot = false;
+    bool failed = false;
+    error_code issue = error_code::memory_fault;
+  };
+
 public:
+  // One CPU owner; the borrowed state and memory outlive the session.
+  // Reuse across native calls, never across simultaneous executions.
+  class execution_session {
+    friend class compiled_block;
+    execution_context context_;
+    const std::span<std::uint64_t> state_;
+
+    execution_session(std::span<std::uint64_t> state,
+                      memory::address_space &memory, mips64::cop0_state *cop0,
+                      mips64::hilo_state *hilo,
+                      mips64::cop1_state *cop1) noexcept
+        : context_{&memory, cop0, hilo, cop1, {}, memory.read_cache()},
+          state_(state) {
+      context_.writes.context = &context_;
+      context_.writes.before_external =
+          cop0 ? &account_before_external : nullptr;
+    }
+
+  public:
+    execution_session(mips64::state &state,
+                      memory::address_space &memory) noexcept
+        : execution_session(state.registers, memory, &state.cop0, &state.hilo,
+                            &state.cop1) {}
+
+    execution_session(const execution_session &) = delete;
+    fn operator=(const execution_session &) -> execution_session & = delete;
+  };
+
   compiled_block(const compiled_block &) = delete;
   fn operator=(const compiled_block &) -> compiled_block & = delete;
 
@@ -157,7 +208,7 @@ public:
       return std::unexpected(error{error_code::hilo_required});
     if (uses_cop0_)
       return std::unexpected(error{error_code::cop0_required});
-    if (uses_memory_)
+    if (uses_memory_ || !regions_.empty())
       return std::unexpected(error{error_code::memory_required});
     return entry_(state.data(), nullptr);
   }
@@ -171,16 +222,41 @@ public:
           std::uint64_t budget = UINT64_MAX, std::uint32_t blocks = 1,
           std::uint64_t cycle_limit = UINT64_MAX) const noexcept
       -> std::expected<execution_result, execution_error> {
+    execution_session session{state, memory, cop0, hilo, cop1};
+    return execute_session<false>(session, code, budget, blocks, cycle_limit);
+  }
+
+  [[nodiscard, gnu::always_inline]] inline fn
+  execute(execution_session &session,
+          std::span<const std::span<const std::byte>> code = {},
+          std::uint64_t budget = UINT64_MAX, std::uint32_t blocks = 1,
+          std::uint64_t cycle_limit = UINT64_MAX) const noexcept
+      -> std::expected<execution_result, execution_error> {
+    return execute_session<true>(session, code, budget, blocks, cycle_limit);
+  }
+
+private:
+  template <bool Complete>
+  [[nodiscard, gnu::always_inline]] inline fn
+  execute_session(execution_session &session,
+                  std::span<const std::span<const std::byte>> code,
+                  std::uint64_t budget, std::uint32_t blocks,
+                  std::uint64_t cycle_limit) const noexcept
+      -> std::expected<execution_result, execution_error> {
+    let &context = session.context_;
+    const let state = session.state_;
     if (!entry_)
       return std::unexpected(execution_error{error_code::unavailable, 0});
     if (state.size() < slots_)
       return std::unexpected(execution_error{error_code::invalid_state, 0});
-    if (uses_cop0_ && !cop0)
-      return std::unexpected(execution_error{error_code::cop0_required, 0});
-    if (uses_hilo_ && !hilo)
-      return std::unexpected(execution_error{error_code::hilo_required, 0});
-    if (uses_cop1_ && !cop1)
-      return std::unexpected(execution_error{error_code::cop1_required, 0});
+    if constexpr (!Complete) {
+      if (uses_cop0_ && !context.cop0)
+        return std::unexpected(execution_error{error_code::cop0_required, 0});
+      if (uses_hilo_ && !context.hilo)
+        return std::unexpected(execution_error{error_code::hilo_required, 0});
+      if (uses_cop1_ && !context.cop1)
+        return std::unexpected(execution_error{error_code::cop1_required, 0});
+    }
     if (guards_writes_ && code.empty())
       return std::unexpected(execution_error{error_code::invalid_state, 0});
     if (!budget || !blocks || (regions_.empty() && budget < instructions_))
@@ -188,45 +264,41 @@ public:
     if (simple_)
       return execution_result{entry_(state.data(), nullptr), instructions_,
                               exit_reason::completed, 1, 0};
-    execution_context context{&memory, cop0, hilo, cop1};
     context.writes.ranges = code;
-    context.read_cache = memory.read_cache();
+    context.executed_slots = 0;
+    context.instruction_base = 0;
+    context.effect_prefix = 0;
+    context.accounted = 0;
+    context.executed_blocks = 0;
+    context.region = 0;
+    context.trap_pc.reset();
+    context.annulled_slot = false;
+    if (context.failed) {
+      context.failed = false;
+      context.fault = {};
+      context.issue = error_code::memory_fault;
+    }
+    context.writes.modified = false;
     context.budget = budget;
     context.block_limit = std::min<std::uint32_t>(64, blocks);
     context.cycle_limit = cycle_limit;
-    if (guards_writes_ && cop0) {
-      context.writes.context = &context;
-      context.writes.before_external = &account_before_external;
-    }
-    const let monitor =
-        memory.monitor_writes(guards_writes_ ? &context.writes : nullptr);
+    const let monitor = context.memory->monitor_writes(
+        guards_writes_ ? &context.writes : nullptr);
     const let pc = entry_(state.data(), &context);
-    const trace_region region = regions_.empty()
-                                    ? trace_region{start_pc_, branch_pc_}
-                                    : regions_[context.region];
     if (context.failed)
-      return std::unexpected(execution_error{
-          context.issue, pc, context.fault,
-          region.branch_pc && pc == *region.branch_pc + 4 ? region.branch_pc
-                                                          : std::nullopt,
-          context.instruction_base +
-              static_cast<std::uint32_t>((pc - region.pc) / 4) -
-              context.accounted,
-          context.instruction_base +
-              static_cast<std::uint32_t>((pc - region.pc) / 4),
-          regions_.empty() ? 1u : context.executed_blocks});
+      return failed_execution(context, pc);
+    if (context.trap_pc)
+      return trapped_execution(context, pc);
     return execution_result{
         pc,
-        context.trap_pc ? context.instruction_base +
-                              static_cast<std::uint32_t>(
-                                  (*context.trap_pc - region.pc) / 4 + 1)
-        : (!regions_.empty() || context.executed_slots)
+        (!regions_.empty() || context.executed_slots)
             ? context.executed_slots
             : instructions_ - (context.annulled_slot ? 1u : 0u),
-        context.trap_pc ? exit_reason::guest_exception : exit_reason::completed,
-        regions_.empty() ? 1u : context.executed_blocks, context.accounted};
+        exit_reason::completed, regions_.empty() ? 1u : context.executed_blocks,
+        context.accounted};
   }
 
+public:
   [[nodiscard]] fn
   run(std::span<std::uint64_t> state, memory::address_space &memory,
       mips64::cop0_state *cop0 = nullptr, mips64::hilo_state *hilo = nullptr,
@@ -241,30 +313,39 @@ public:
 private:
   friend class compiler;
 
-  struct execution_context {
-    memory::address_space *memory;
-    mips64::cop0_state *cop0;
-    mips64::hilo_state *hilo;
-    mips64::cop1_state *cop1;
-    memory::write_monitor writes{};
-    const memory::cache_entry *read_cache = nullptr;
-    std::uint32_t executed_slots = 0;
-    std::uint32_t instruction_base = 0;
-    std::uint32_t effect_prefix = 0;
-    std::uint32_t accounted = 0;
-    std::uint32_t executed_blocks = 0;
-    std::uint32_t block_limit = 1;
-    std::uint32_t region = 0;
-    std::uint64_t budget = UINT64_MAX;
-    std::uint64_t cycle_limit = UINT64_MAX;
-    std::optional<std::uint64_t> trap_pc{};
-    memory::fault fault{};
-    bool annulled_slot = false;
-    bool failed = false;
-    error_code issue = error_code::memory_fault;
-  };
+  [[gnu::cold, gnu::noinline]] fn
+  failed_execution(const execution_context &context,
+                   std::uint64_t pc) const noexcept
+      -> std::unexpected<execution_error> {
+    const trace_region region = regions_.empty()
+                                    ? trace_region{start_pc_, branch_pc_}
+                                    : regions_[context.region];
+    return std::unexpected(execution_error{
+        context.issue, pc, context.fault,
+        region.branch_pc && pc == *region.branch_pc + 4 ? region.branch_pc
+                                                        : std::nullopt,
+        context.instruction_base +
+            static_cast<std::uint32_t>((pc - region.pc) / 4) -
+            context.accounted,
+        context.instruction_base +
+            static_cast<std::uint32_t>((pc - region.pc) / 4),
+        regions_.empty() ? 1u : context.executed_blocks});
+  }
 
-private:
+  [[gnu::cold, gnu::noinline]] fn
+  trapped_execution(const execution_context &context,
+                    std::uint64_t pc) const noexcept -> execution_result {
+    const trace_region region = regions_.empty()
+                                    ? trace_region{start_pc_, branch_pc_}
+                                    : regions_[context.region];
+    return execution_result{
+        pc,
+        context.instruction_base +
+            static_cast<std::uint32_t>((*context.trap_pc - region.pc) / 4 + 1),
+        exit_reason::guest_exception,
+        regions_.empty() ? 1u : context.executed_blocks, context.accounted};
+  }
+
   using entry_point = std::uint64_t (*)(std::uint64_t *, execution_context *);
 
   static fn account_before_external(void *opaque) noexcept -> void {
@@ -582,6 +663,8 @@ public:
       if (errors.code)
         return failure(errors.code, 0);
       function->setArg(1, context);
+      output.virtRegByReg(state)->setWeight(255);
+      output.virtRegByReg(context)->setWeight(255);
       bool uses_cop1 = false;
       bool uses_memory = fuse;
       bool uses_cop0 = false;

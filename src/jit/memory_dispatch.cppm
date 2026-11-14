@@ -60,6 +60,7 @@ public:
         for (let &entry : set.entries)
           entry.validated_slice = 0;
     }
+    amd64::compiled_block::execution_session native{state, memory_};
     dispatch_result result{stop_reason::yielded, 0, 0, 0};
     cached_block *predicted = nullptr;
     std::uint64_t predicted_pc = 0;
@@ -125,14 +126,13 @@ public:
                                              (state.cop0.half_cycle ? 1u : 0u)
                                        : UINT64_MAX;
       const let executed =
-          entry.cold ? interpret(entry, state)
-                     : entry.code->execute(
-                           state.registers, memory_, &state.cop0, &state.hilo,
-                           &state.cop1, entry.source_ranges,
-                           budget - result.instructions,
-                           static_cast<std::uint32_t>(std::min<std::size_t>(
-                               64, block_limit - result.blocks)),
-                           cycle_limit);
+          entry.cold
+              ? interpret(entry, state)
+              : entry.code->execute(
+                    native, entry.source_ranges, budget - result.instructions,
+                    static_cast<std::uint32_t>(
+                        std::min<std::size_t>(64, block_limit - result.blocks)),
+                    cycle_limit);
       if (!executed)
         return execution_failure(state, executed.error(), result);
       state.cop0.advance_cycles(executed->instructions -

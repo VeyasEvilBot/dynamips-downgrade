@@ -2887,30 +2887,26 @@ fn bounded_native_traces() -> void {
   const std::array code{
       std::span<const std::byte>{ram}.first(words.size() * 4)};
   mips::state state{};
+  amd64::compiled_block::execution_session session{state, **memory};
+  const let raw = (**native).code.run(state.registers);
+  require(!raw && raw.error().code == amd64::error_code::memory_required,
+          "a fused arithmetic trace requires an execution context");
   state.registers[2] = state.registers[4] = 1000;
-  const let full =
-      (**native).code.execute(state.registers, **memory, &state.cop0,
-                              &state.hilo, &state.cop1, code, 1000, 64);
+  const let full = (**native).code.execute(session, code, 1000, 64);
   require(
       full && full->blocks == 64 && full->instructions == 160 &&
           full->next_pc == 0x1000 && state.registers[1] == 32 &&
           state.registers[3] == 32 && state.registers[5] == 32,
       "native backedges stop at the caller's device-service block boundary");
-  const let small =
-      (**native).code.execute(state.registers, **memory, &state.cop0,
-                              &state.hilo, &state.cop1, code, 7, 64);
+  const let small = (**native).code.execute(session, code, 7, 64);
   require(small && small->instructions == 5 && small->next_pc == 0x1000 &&
               state.registers[1] == 33 && state.registers[5] == 33,
           "native traces stop before exceeding an instruction budget");
-  const let zero =
-      (**native).code.execute(state.registers, **memory, &state.cop0,
-                              &state.hilo, &state.cop1, code, 100, 0);
+  const let zero = (**native).code.execute(session, code, 100, 0);
   require(zero && zero->instructions == 0 && zero->blocks == 0 &&
               state.registers[1] == 33,
           "zero native block allowance performs no guest work");
-  const let timer =
-      (**native).code.execute(state.registers, **memory, &state.cop0,
-                              &state.hilo, &state.cop1, code, 1000, 64, 4);
+  const let timer = (**native).code.execute(session, code, 1000, 64, 4);
   require(
       timer && timer->instructions == 5 && timer->blocks == 2,
       "native traces stop at the first block boundary after a timer deadline");
@@ -2922,9 +2918,7 @@ fn bounded_native_traces() -> void {
   state = {};
   state.registers[3] = 0x3100;
   state.registers[4] = 0x9000;
-  const let fault =
-      (**native).code.execute(state.registers, **memory, &state.cop0,
-                              &state.hilo, &state.cop1, code, 1000, 64);
+  const let fault = (**native).code.execute(session, code, 1000, 64);
   require(!fault && fault.error().pc == 0x1008 &&
               fault.error().completed_instructions == 2 &&
               state.registers[1] == 1 &&
@@ -2940,13 +2934,50 @@ fn bounded_native_traces() -> void {
   state = {};
   state.registers[3] = 0x3004;
   state.registers[2] = 0x24040009;
-  const let changed =
-      (**native).code.execute(state.registers, **memory, &state.cop0,
-                              &state.hilo, &state.cop1, code, 1000, 64);
+  const let changed = (**native).code.execute(session, code, 1000, 64);
   require(changed && changed->instructions == 1 && changed->next_pc == 0x1004 &&
               state.registers[4] == 0 &&
               (*memory)->fetch<std::uint32_t>({0x1004}) == 0x24040009,
           "code alias writes exit before executing stale native instructions");
+
+  std::pmr::monotonic_buffer_resource arena{scratch.data(), scratch.size(),
+                                            std::pmr::null_memory_resource()};
+  constexpr std::array trap_words{mips::instruction_word{0x0000000c}};
+  let trap_block = mips::translate(trap_words, {0x9000}, arena);
+  require(trap_block.has_value(), "translate session exception boundary");
+  let trap_native = compiler->compile(*trap_block, arena);
+  require(trap_native.has_value(), "compile session exception boundary");
+  const let trapped = trap_native->execute(session);
+  require(
+      trapped && trapped->reason == amd64::exit_reason::guest_exception &&
+          trapped->instructions == 1,
+      "a reused session delivers an exception after a monitored code write");
+  constexpr std::array annul_words{mips::instruction_word{0x50c70001},
+                                   mips::instruction_word{0x24040002}};
+  let annul_block = mips::translate(annul_words, {0x9004}, arena);
+  require(annul_block.has_value(), "translate session branch-likely boundary");
+  let annul_native = compiler->compile(*annul_block, arena);
+  require(annul_native.has_value(), "compile session branch-likely boundary");
+  state.registers[6] = 1;
+  state.registers[7] = 2;
+  const let annulled = annul_native->execute(session);
+  require(annulled && annulled->reason == amd64::exit_reason::completed &&
+              annulled->instructions == 1 && state.registers[4] == 0,
+          "a reused session annuls a likely slot after an exception");
+  state = {};
+  state.registers[3] = 0x3100;
+  state.registers[2] = 9;
+  mem::write_monitor outer{code};
+  const let monitor = (*memory)->monitor_writes(&outer);
+  const let resumed = (**native).code.execute(session, code, 1000, 64);
+  require(resumed && resumed->reason == amd64::exit_reason::completed &&
+              resumed->instructions == 4 && resumed->blocks == 1 &&
+              resumed->accounted_instructions == 0 && state.registers[4] == 1 &&
+              (*memory)->load<std::uint32_t>({0x1100}) == 9,
+          "session reuse clears exception, fault, trace and write-exit state");
+  require((*memory)->store<std::uint32_t>({0x1000}, 0).has_value() &&
+              outer.modified,
+          "session calls restore the surrounding memory write monitor");
 }
 
 fn writable_code_dispatch() -> void {

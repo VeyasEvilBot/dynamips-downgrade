@@ -91,7 +91,8 @@ use an independent interpreter before native promotion; hot loops use bounded
 native traces. RAM write versions, opaque-callback epochs and byte checks preserve
 code coherency, including physical aliases. Checked native RAM probes retain
 fault/MMIO fallbacks. Traces stop for instruction budgets, timer deadlines,
-code changes and device-service boundaries.
+code changes and device-service boundaries. Native calls reuse a per-slice
+execution session; fault and exception metadata is decoded on those exits.
 
 Before the MMU/exception refactor, seven alternating process starts per core on
 one Linux amd64 host using the
