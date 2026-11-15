@@ -7,6 +7,8 @@ module;
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <memory_resource>
+#include <vector>
 #include <new>
 #include <optional>
 #include <span>
@@ -14,6 +16,7 @@ module;
 #include <dynamips/macros.h>
 export module jit.memory_dispatch;
 import jit.dispatch;
+import jit.ir;
 import jit.mips64;
 import jit.memory;
 import jit.amd64;
@@ -48,6 +51,37 @@ public:
       return std::unexpected(
           dispatch_error{dispatch_error_code::out_of_memory, 0});
     }
+  }
+
+  [[nodiscard]] fn region_compilations() const noexcept -> std::size_t {
+    return region_compilations_;
+  }
+
+  [[nodiscard]] fn largest_region() const noexcept -> std::size_t {
+    return largest_region_;
+  }
+
+  [[nodiscard]] fn region_block_count(std::uint64_t pc) noexcept
+      -> std::size_t {
+    const let *entry = find_cached(pc);
+    return entry && entry->region ? entry->region->blocks : 0;
+  }
+
+  [[nodiscard]] fn region_closed_to_root(std::uint64_t pc) noexcept -> bool {
+    const let *entry = find_cached(pc);
+    return entry && entry->region && entry->region->closed_to_root;
+  }
+
+  [[nodiscard]] fn region_backedge(std::uint64_t pc) noexcept
+      -> std::optional<std::size_t> {
+    const let *entry = find_cached(pc);
+    return entry && entry->region ? entry->region->backedge : std::nullopt;
+  }
+
+  [[nodiscard]] fn region_watch_count(std::uint64_t pc) noexcept
+      -> std::size_t {
+    const let *entry = find_cached(pc);
+    return entry && entry->region ? entry->region->range_count : 0;
   }
 
   [[nodiscard]] fn run_slice(mips64::state &state, std::uint64_t budget,
@@ -90,16 +124,24 @@ public:
       const let pc = state.pc.value;
       let &entry = predicted && predicted_pc == pc ? *predicted : select(pc);
       predicted = nullptr;
+      if (entry.region && entry.region->disjoint_state != &state) {
+        if (!source_disjoint(std::span{entry.region->ranges}.first(
+                                 entry.region->range_count),
+                             state))
+          entry = {};
+        else
+          entry.region->disjoint_state = &state;
+      }
       if (!valid(entry, pc) ||
           entry.instructions > budget - result.instructions) {
         let compiled =
-            compile(entry, pc, dump_ir,
+            compile(entry, state, pc, dump_ir,
                     std::min<std::uint64_t>(64, budget - result.instructions));
         if (!compiled)
           return fetch_failure(state, compiled.error(), result, budget);
         result.compiled += *compiled;
       }
-      if (entry.count_pattern && count_source_disjoint(entry, state) &&
+      if (entry.count_pattern && source_disjoint(entry.source_ranges, state) &&
           count_tail_complete(pc)) {
         if (const let batch = count_batch::run(*entry.count_pattern, state,
                                                budget - result.instructions,
@@ -111,7 +153,7 @@ public:
       }
       if (entry.cold && entry.hits++ >= cold_threshold_ - 1) {
         let warmed =
-            compile(entry, pc, dump_ir,
+            compile(entry, state, pc, dump_ir,
                     std::min<std::uint64_t>(64, budget - result.instructions),
                     false, false);
         if (!warmed)
@@ -123,7 +165,7 @@ public:
           budget - result.instructions >= 64 &&
           block_limit - result.blocks > 1) {
         entry.tracing_attempted = true;
-        let promoted = compile(entry, pc, dump_ir, 64, true);
+        let promoted = compile(entry, state, pc, dump_ir, 64, true);
         if (!promoted)
           return std::unexpected(promoted.error());
         result.compiled += *promoted;
@@ -141,12 +183,18 @@ public:
           entry.cold
               ? interpret(entry, state)
               : entry.code->execute(
-                    native, entry.source_ranges, budget - result.instructions,
+                    native, code_ranges(entry), budget - result.instructions,
                     static_cast<std::uint32_t>(
                         std::min<std::size_t>(64, block_limit - result.blocks)),
-                    cycle_limit);
+                    cycle_limit, memory::range_stability::stable);
       if (!executed)
         return execution_failure(state, executed.error(), result);
+      if (!entry.fused && executed->reason == amd64::exit_reason::completed &&
+          executed->instructions == entry.instructions) {
+        entry.first_successor_pc = executed->next_pc;
+        entry.first_words = entry.instructions;
+        entry.successor_observed = true;
+      }
       state.cop0.advance_cycles(executed->instructions -
                                 executed->accounted_instructions);
       state.pc.value = executed->next_pc;
@@ -238,7 +286,35 @@ private:
                        error.code});
   }
 
+  struct region_identity {
+    struct fragment {
+      std::uint64_t pc;
+      std::size_t source_offset;
+      std::span<const std::byte> backing;
+    };
+
+    std::array<std::byte, 256 * 4> source{};
+    std::array<fragment, 64> fragments{};
+
+    struct watch_page {
+      const std::byte *base = nullptr;
+      std::size_t begin = 0, end = 0;
+    };
+
+    std::array<watch_page, 4> watch_pages{};
+    std::array<std::span<const std::byte>, 4> ranges{};
+    std::array<std::uint64_t, 4> pages{};
+    std::array<memory::backing_stamp, 4> stamps{};
+    std::array<std::uint64_t, 4> versions{};
+    std::size_t fragment_count = 0, page_count = 0, bytes = 0, blocks = 0;
+    std::size_t range_count = 0;
+    bool closed_to_root = false;
+    const mips64::state *disjoint_state = nullptr;
+    std::optional<std::size_t> backedge{};
+  };
+
   struct cached_block {
+    std::unique_ptr<region_identity> region;
     std::optional<amd64::compiled_block> code;
     std::uint64_t pc = 0;
     std::uint64_t generation = 0;
@@ -253,6 +329,9 @@ private:
     bool tracing_attempted = false;
     bool cold = false;
     bool speculative_source = false;
+    bool fused = false, successor_observed = false;
+    std::uint64_t first_successor_pc = 0;
+    std::uint32_t first_words = 0;
     std::array<cached_block *, 2> successors{};
     std::array<mips64::instruction_word, 65> source{};
     std::array<std::span<const std::byte>, 2> source_ranges{};
@@ -265,10 +344,12 @@ private:
 
   const std::uint16_t cold_threshold_;
   std::uint64_t slice_ = 0;
+  std::size_t region_compilations_ = 0, largest_region_ = 0;
   memory::address_space &memory_;
   amd64::compiler compiler_;
   std::array<cache_set, cache_sets> cache_{};
   alignas(std::max_align_t) std::array<std::byte, 64 * 1024> scratch_;
+  alignas(std::max_align_t) std::array<std::byte, 512 * 1024> region_scratch_;
 
   memory_dispatcher(memory::address_space &memory, amd64::compiler compiler,
                     std::uint16_t cold_threshold) noexcept
@@ -340,13 +421,13 @@ private:
   }
 
   [[nodiscard]] static inline fn
-  count_source_disjoint(const cached_block &entry,
-                        const mips64::state &state) noexcept -> bool {
+  source_disjoint(std::span<const std::span<const std::byte>> ranges,
+                  const mips64::state &state) noexcept -> bool {
     const let begin = reinterpret_cast<std::uintptr_t>(&state);
     if (sizeof(state) > UINTPTR_MAX - begin)
       return false;
     const let end = begin + sizeof(state);
-    for (const let range : entry.source_ranges) {
+    for (const let range : ranges) {
       if (range.empty())
         continue;
       const let source = reinterpret_cast<std::uintptr_t>(range.data());
@@ -369,6 +450,8 @@ private:
       return false;
     if (entry.speculative_source && !memory_.may_speculate_translation())
       return false;
+    if (entry.region)
+      return valid_region(entry);
     if (entry.generation == memory_.mapping_generation() && validated(entry) &&
         entry.external_generation == memory_.external_generation() &&
         entry.versions[0] == entry.stamps[0].value() &&
@@ -414,9 +497,315 @@ private:
     return unchanged;
   }
 
-  fn compile(cached_block &entry, std::uint64_t pc, bool dump_ir,
-               std::uint64_t limit, bool trace = false,
-               bool allow_cold = true) noexcept
+  fn code_ranges(const cached_block &entry) const noexcept
+      -> std::span<const std::span<const std::byte>> {
+    if (entry.region)
+      return std::span{entry.region->ranges}.first(entry.region->range_count);
+    return entry.source_ranges;
+  }
+
+  [[gnu::noinline]] fn valid_region(cached_block &entry) noexcept -> bool {
+    let &identity = *entry.region;
+    if (entry.generation != memory_.mapping_generation()) {
+      // Resolve every fragment before reading any borrowed backing or stamp.
+      for (std::size_t i = 0; i < identity.fragment_count; i++) {
+        const let &fragment = identity.fragments[i];
+        const let current = memory_.executable_tail({fragment.pc});
+        if (!current || current->size() < fragment.backing.size() ||
+            current->data() != fragment.backing.data())
+          return false;
+      }
+      entry.generation = memory_.mapping_generation();
+      entry.validated_slice = 0;
+    }
+    bool unchanged = validated(entry) &&
+                     entry.external_generation == memory_.external_generation();
+    for (std::size_t i = 0; i < identity.page_count; i++)
+      unchanged =
+          unchanged && identity.versions[i] == identity.stamps[i].value();
+    if (unchanged)
+      return true;
+    for (std::size_t i = 0; i < identity.fragment_count; i++) {
+      const let &fragment = identity.fragments[i];
+      if (std::memcmp(fragment.backing.data(),
+                      identity.source.data() + fragment.source_offset,
+                      fragment.backing.size()) != 0)
+        return false;
+    }
+    for (std::size_t i = 0; i < identity.page_count; i++)
+      identity.versions[i] = identity.stamps[i].value();
+    entry.validated_slice = slice_;
+    entry.external_generation = memory_.external_generation();
+    return true;
+  }
+
+  fn find_cached(std::uint64_t pc) noexcept -> cached_block * {
+    const let index = ((pc >> 2) ^ (pc >> 14) ^ (pc >> 26)) & (cache_sets - 1);
+    for (let &candidate : cache_[index].entries)
+      if ((candidate.code || candidate.cold) && candidate.pc == pc)
+        return &candidate;
+    return nullptr;
+  }
+
+  // Predictions choose compilation candidates only. Native edges still check
+  // the architectural branch condition or indirect target before transferring.
+  fn compile_region(cached_block &entry, const mips64::state &state,
+                      std::uint64_t pc) noexcept
+      -> std::expected<bool, dispatch_error> {
+
+    if (!memory_.may_speculate_translation())
+      return false;
+    try {
+      std::pmr::monotonic_buffer_resource arena{
+          region_scratch_.data(), region_scratch_.size(),
+          std::pmr::null_memory_resource()};
+      std::pmr::vector<ir::block> blocks{&arena};
+      blocks.reserve(32);
+      let identity = std::make_unique<region_identity>();
+      std::size_t words_used = 0;
+      std::array<std::uint64_t, 8> returns{};
+      std::size_t return_depth = 0;
+
+      struct path_context {
+        std::uint64_t pc = 0;
+        std::size_t depth = 0;
+        std::array<std::uint64_t, 8> returns{};
+      };
+
+      std::array<path_context, 32> contexts{};
+      let current_pc = pc;
+      while (blocks.size() < 32 && words_used < 256) {
+        std::optional<std::size_t> repeated;
+        for (std::size_t i = 0; i < blocks.size(); i++) {
+          const let &prior = contexts[i];
+          if (prior.pc == current_pc && prior.depth == return_depth &&
+              std::equal(returns.begin(), returns.begin() + return_depth,
+                         prior.returns.begin())) {
+            repeated = i;
+            break;
+          }
+        }
+        if (repeated) {
+          identity->closed_to_root = *repeated == 0;
+          identity->backedge = repeated;
+          break;
+        }
+        contexts[blocks.size()] = {current_pc, return_depth, returns};
+        std::array<mips64::instruction_word, 65> words{};
+        std::size_t count = 0;
+        bool delay = false, barrier = false;
+        const let maximum = std::min<std::size_t>(64, 256 - words_used);
+        while (count < maximum || delay) {
+          if (count >= words.size() || count >= 256 - words_used ||
+              count > (UINT64_MAX - current_pc) / 4) {
+            if (delay && count)
+              count--;
+            break;
+          }
+          // Speculative candidates must be ordinary executable backing. Never
+          // invoke a device callback while discovering an untaken path.
+          const let backing = memory_.executable_tail({current_pc + count * 4});
+          if (!backing || backing->size() < sizeof(std::uint32_t) ||
+              !backing->data()) {
+            if (delay && count)
+              count--;
+            break;
+          }
+          std::uint32_t fetched;
+          std::memcpy(&fetched, backing->data(), sizeof(fetched));
+          if constexpr (std::endian::native == std::endian::little)
+            fetched = std::byteswap(fetched);
+          const let op = fetched >> 26;
+          // Keep CP0, CACHE and explicit serialization outside native regions.
+          barrier =
+              op == 0x10 || op == 0x2f ||
+              (op == 0 && ((fetched & 63) == 0x0c || (fetched & 63) == 0x0d ||
+                           (fetched & 63) == 0x0f));
+          if (barrier)
+            break;
+          words[count++] = {fetched};
+          if (delay)
+            break;
+          delay = mips64::has_delay_slot({fetched});
+        }
+        if (!count || barrier)
+          break;
+        let translated = mips64::translate(std::span{words}.first(count),
+                                            {current_pc}, arena);
+        if (!translated) {
+          let prefix = translated.error().instruction_index;
+          if (prefix && mips64::has_delay_slot(words[prefix - 1]))
+            prefix--;
+          if (!prefix)
+            break;
+          translated = mips64::translate(std::span{words}.first(prefix),
+                                         {current_pc}, arena);
+        }
+        if (!translated)
+          break;
+        count = translated->info().instruction_count;
+        if (count > (UINT64_MAX - current_pc) / 4)
+          break;
+        std::array<region_identity::fragment, 2> fragments{};
+        std::size_t fragment_count = 0, copied = 0;
+        bool unavailable = false;
+        std::array<std::uint64_t, 2> added_pages{};
+        std::size_t added_count = 0;
+        while (copied < count * 4) {
+          const let at = current_pc + copied;
+          const let backing = memory_.executable_tail({at});
+          if (!backing) {
+            unavailable = true;
+            break;
+          }
+          const let size =
+              std::min<std::size_t>(count * 4 - copied, backing->size());
+          if (!size || fragment_count == fragments.size()) {
+            unavailable = true;
+            break;
+          }
+          fragments[fragment_count++] = {at, identity->bytes + copied,
+                                         backing->first(size)};
+          const let page = at & ~std::uint64_t{memory::page_size - 1};
+          bool known = false;
+          for (std::size_t i = 0; i < identity->page_count; i++)
+            known = known || identity->pages[i] == page;
+          if (!known)
+            added_pages[added_count++] = page;
+          copied += size;
+        }
+        if (unavailable || identity->page_count + added_count > 4 ||
+            identity->fragment_count + fragment_count >
+                identity->fragments.size())
+          break;
+        let watches = identity->watch_pages;
+        let watch_count = identity->range_count;
+        for (std::size_t i = 0; i < fragment_count; i++) {
+          const let &fragment = fragments[i];
+          const let offset =
+              static_cast<std::size_t>(fragment.pc & (memory::page_size - 1));
+          const let *base = fragment.backing.data() - offset;
+          std::size_t watch = 0;
+          while (watch < watch_count && watches[watch].base != base)
+            watch++;
+          if (watch == watch_count) {
+            if (watch_count == watches.size()) {
+              unavailable = true;
+              break;
+            }
+            watches[watch_count++] = {base, offset,
+                                      offset + fragment.backing.size()};
+          } else {
+            watches[watch].begin = std::min(watches[watch].begin, offset);
+            watches[watch].end =
+                std::max(watches[watch].end, offset + fragment.backing.size());
+          }
+        }
+        if (unavailable ||
+            !ir::optimize(*translated, ir::fold_constants,
+                          ir::simplify_identities, ir::fold_constants))
+          break;
+        identity->watch_pages = watches;
+        identity->range_count = watch_count;
+        for (std::size_t i = 0; i < watch_count; i++)
+          identity->ranges[i] = {watches[i].base + watches[i].begin,
+                                 watches[i].end - watches[i].begin};
+        for (std::size_t i = 0; i < fragment_count; i++) {
+          const let &fragment = fragments[i];
+          const let index = identity->fragment_count++;
+          identity->fragments[index] = fragment;
+        }
+        for (std::size_t i = 0; i < added_count; i++) {
+          const let index = identity->page_count++;
+          identity->pages[index] = added_pages[i];
+          // A translated host page can span two RAM-relative version pages.
+          for (std::size_t j = 0; j < fragment_count; j++)
+            if ((fragments[j].pc & ~std::uint64_t{memory::page_size - 1}) ==
+                added_pages[i]) {
+              const let offset = fragments[j].pc & (memory::page_size - 1);
+              identity->stamps[index] = memory_.stamp(
+                  {fragments[j].backing.data() - offset, memory::page_size});
+            }
+          identity->versions[index] = identity->stamps[index].value();
+        }
+        for (std::size_t i = 0; i < count; i++) {
+          const let bits = std::endian::native == std::endian::little
+                               ? std::byteswap(words[i].bits)
+                               : words[i].bits;
+          std::memcpy(identity->source.data() + identity->bytes + i * 4, &bits,
+                      sizeof(bits));
+        }
+        identity->bytes += count * 4;
+        words_used += count;
+        blocks.push_back(std::move(*translated));
+        const let &block = blocks.back();
+        if (const let branch_pc = block.branch_pc()) {
+          const let bits = words[(*branch_pc - current_pc) / 4].bits;
+          const let op = bits >> 26;
+          const bool jalr =
+              op == 0 && (bits & 63) == 9 && ((bits >> 11) & 31) == 31;
+          if (op == 3 || jalr) {
+            if (return_depth == returns.size())
+              break;
+            returns[return_depth++] = *branch_pc + 8;
+          }
+          if (op == 0 && (bits & 63) == 8 && return_depth) {
+            current_pc = returns[--return_depth];
+            continue;
+          }
+          if ((op == 2 || op == 3) && block.jump()) {
+            current_pc = block.jump()->target;
+            continue;
+          }
+        }
+        const let *observed = find_cached(current_pc);
+        if (!observed)
+          break;
+        if (!observed->successor_observed || observed->first_words != count ||
+            observed->first_successor_pc % 4)
+          break;
+        current_pc = observed->first_successor_pc;
+        if (block.indirect() && return_depth &&
+            current_pc == returns[return_depth - 1])
+          return_depth--;
+      }
+      if (blocks.size() < 2 || blocks.front().info().start_pc != pc ||
+          !source_disjoint(
+              std::span{identity->ranges}.first(identity->range_count), state))
+        return false;
+      let code = compiler_.compile_trace(blocks, arena, true, true, true,
+                                          identity->backedge);
+      if (!code)
+        return std::unexpected(dispatch_error{
+            dispatch_error_code::compilation, pc, {}, {}, code.error()});
+      identity->blocks = blocks.size();
+      identity->disjoint_state = &state;
+      entry.code.emplace(std::move(*code));
+      entry.instructions = blocks.front().info().instruction_count;
+      entry.region = std::move(identity);
+      entry.speculative_source = true;
+      entry.cold = false;
+      entry.fused = true;
+      entry.tracing_attempted = true;
+      entry.generation = memory_.mapping_generation();
+      entry.validated_slice = 0;
+      entry.hits = 0;
+      entry.successors = {};
+      region_compilations_++;
+      largest_region_ = std::max(largest_region_, blocks.size());
+      if (!valid_region(entry))
+        return std::unexpected(
+            dispatch_error{dispatch_error_code::code_changed, pc});
+      return true;
+    } catch (const std::bad_alloc &) {
+      return std::unexpected(
+          dispatch_error{dispatch_error_code::out_of_memory, pc});
+    }
+  }
+
+  fn compile(cached_block &entry, const mips64::state &state,
+               std::uint64_t pc, bool dump_ir, std::uint64_t limit,
+               bool trace = false, bool allow_cold = true) noexcept
       -> std::expected<bool, dispatch_error> {
     std::array<mips64::instruction_word, 65> words{};
     std::size_t count = 0;
@@ -473,7 +862,7 @@ private:
       if (!promoted)
         return std::unexpected(promoted.error());
       if (!*promoted)
-        return false;
+        return compile_region(entry, state, pc);
       native = std::move(**promoted);
     } else if (!cold) {
       native = compile_native_block(std::span{words}.first(count), {pc},
@@ -527,6 +916,7 @@ private:
     }
     const let bytes = source_words * 4;
     const let first_bytes = std::min<std::size_t>(bytes, first->size());
+    entry.region.reset();
     entry.source_ranges = {std::span{host[0], first_bytes},
                            std::span{host[1], bytes - first_bytes}};
     entry.stamps = {memory_.stamp(entry.source_ranges[0]),
@@ -541,6 +931,11 @@ private:
     entry.count_pattern = count_pattern;
     entry.speculative_source = trace || count_pattern.has_value();
     entry.cold = cold;
+    entry.fused = trace;
+    if (!trace) {
+      entry.successor_observed = false;
+      entry.first_words = 0;
+    }
     for (std::size_t i = 0; i < source_words; i++) {
       const let bits = words[i].bits;
       entry.source[i].bits = std::endian::native == std::endian::little

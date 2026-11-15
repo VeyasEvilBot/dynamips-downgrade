@@ -39,7 +39,8 @@ fn blocked(std::error_code error) -> bool {
   return error == asio::error::would_block || error == asio::error::try_again;
 }
 
-struct connection {
+// Clang 21 loses Asio's delegated allocator initialization through modules.
+struct connection { // NOLINT(clang-analyzer-core.uninitialized.Assign)
   asio::io_context context;
   asio::local::stream_protocol::socket peer{context};
   std::unique_ptr<transport> server;

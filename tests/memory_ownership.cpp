@@ -446,6 +446,94 @@ fn mutable_code_descriptors() -> void {
           "rebinding a live code-range span preserves the existing contract");
 }
 
+fn stable_code_ranges() -> void {
+  fixture f;
+  const std::array code{
+      std::span<const std::byte>{f.backing.extra}.subspan(64, 16),
+      std::span<const std::byte>{f.backing.extra}.subspan(256, 16)};
+  unsigned callbacks = 0;
+  mem::write_monitor monitor{code, false, &callbacks,
+                             &fixture::before_external};
+  require(monitor.stability == mem::range_stability::dynamic,
+          "existing monitor aggregate construction keeps live descriptors");
+  monitor.stability = mem::range_stability::stable;
+  const let scope = f.memory->monitor_writes(&monitor);
+  for (const std::size_t offset : {0u, 60u, 80u, 128u, 252u, 272u, 512u})
+    require(f.memory->store<std::uint32_t>(
+                        f.address(f.backing.extra.data() + offset), 1)
+                    .has_value() &&
+                !monitor.modified,
+            "stable enclosing bounds reject outside stores and preserve gaps");
+  for (const let range : code) {
+    require(f.memory->store<std::uint32_t>(f.address(range.data()), 2)
+                    .has_value() &&
+                monitor.modified,
+            "each code range inside the cached envelope remains watched");
+    monitor.modified = false;
+  }
+  monitor.architectural_state = f.registers;
+  require(f.memory->store<std::uint32_t>(f.address(f.registers.data()), 3)
+                  .has_value() &&
+              monitor.modified,
+          "the CPU-state span is checked before rejecting a code envelope");
+  monitor.modified = false;
+  f.memory->invalidate();
+  require(monitor.modified && callbacks == 1,
+          "stable range bounds do not hide external effects or time hooks");
+}
+
+fn stable_nested_scopes() -> void {
+  fixture f;
+  const std::array outer_code{
+      std::span<const std::byte>{f.backing.extra}.subspan(64, 16)};
+  const std::array inner_code{
+      std::span<const std::byte>{f.backing.extra}.subspan(256, 16)};
+  mem::write_monitor outer{outer_code}, inner{inner_code};
+  outer.stability = inner.stability = mem::range_stability::stable;
+  const let outer_scope = f.memory->monitor_writes(&outer);
+  {
+    const let nested = f.memory->monitor_writes(&inner);
+    require(f.memory->store<std::uint32_t>(f.address(outer_code[0].data()), 1)
+                    .has_value() &&
+                !outer.modified && !inner.modified,
+            "an inner stable scope installs independent enclosing bounds");
+    require(f.memory->store<std::uint32_t>(f.address(inner_code[0].data()), 2)
+                    .has_value() &&
+                inner.modified && !outer.modified,
+            "only the inner stable observer sees its source writes");
+  }
+  require(f.memory->store<std::uint32_t>(f.address(outer_code[0].data()), 3)
+                  .has_value() &&
+              outer.modified,
+          "leaving the inner scope restores outer code bounds");
+  outer.modified = false;
+  require(f.memory->store<std::uint32_t>(f.address(inner_code[0].data()), 4)
+                  .has_value() &&
+              !outer.modified,
+          "the restored outer scope does not retain the inner envelope");
+  {
+    const let disabled = f.memory->monitor_writes(nullptr);
+    require(f.memory->store<std::uint32_t>(f.address(outer_code[0].data()), 5)
+                    .has_value() &&
+                !outer.modified,
+            "a nested null monitor temporarily disables observation");
+  }
+  std::array live = inner_code;
+  mem::write_monitor dynamic{live};
+  {
+    const let nested = f.memory->monitor_writes(&dynamic);
+    live[0] = std::span<const std::byte>{f.backing.extra}.subspan(512, 16);
+    require(f.memory->store<std::uint32_t>(f.address(live[0].data()), 6)
+                    .has_value() &&
+                dynamic.modified && !outer.modified,
+            "a dynamic inner scope keeps descriptors live inside stable outer");
+  }
+  require(f.memory->store<std::uint32_t>(f.address(outer_code[0].data()), 7)
+                  .has_value() &&
+              outer.modified,
+          "null and dynamic nested scopes restore the original stable bounds");
+}
+
 struct translator {
   fixture &owner;
   mem::write_monitor *monitor;
@@ -924,6 +1012,8 @@ fn main() -> int {
   watch_proofs::linked_stores();
   watch_proofs::translation_effects();
   watch_proofs::mutable_code_descriptors();
+  watch_proofs::stable_code_ranges();
+  watch_proofs::stable_nested_scopes();
   translation_proofs::ram_and_faults();
   translation_proofs::mmio_effects();
   translation_proofs::setter_invalidates();

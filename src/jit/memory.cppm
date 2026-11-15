@@ -148,6 +148,9 @@ struct backing_stamp {
   }
 };
 
+// Stable scopes keep code descriptors and backing addresses fixed until exit.
+enum class range_stability : std::uint8_t { dynamic, stable };
+
 struct write_monitor {
   std::span<const std::span<const std::byte>> ranges{};
   bool modified = false;
@@ -155,6 +158,7 @@ struct write_monitor {
   void (*before_external)(void *) noexcept = nullptr;
   // Borrowed CPU-state bytes outlive the monitoring scope.
   std::span<const std::byte> architectural_state{};
+  range_stability stability = range_stability::dynamic;
 };
 
 // While execution caches are active, tracked owners route every RAM write
@@ -169,16 +173,44 @@ public:
   class monitoring_scope {
     address_space &owner_;
     write_monitor *previous_;
+    std::uintptr_t previous_begin_, previous_end_;
 
   public:
     inline monitoring_scope(address_space &owner,
                             write_monitor *monitor) noexcept
-        : owner_(owner), previous_(std::exchange(owner.monitor_, monitor)) {}
+        : owner_(owner), previous_(std::exchange(owner.monitor_, monitor)),
+          previous_begin_(owner.monitor_begin_),
+          previous_end_(owner.monitor_end_) {
+      owner.monitor_begin_ = UINTPTR_MAX;
+      owner.monitor_end_ = 0;
+      if (monitor && monitor->stability == range_stability::dynamic) {
+        owner.monitor_begin_ = 0;
+        owner.monitor_end_ = UINTPTR_MAX;
+      }
+      if (monitor && monitor->stability == range_stability::stable)
+        for (const let range : monitor->ranges) {
+          if (range.empty())
+            continue;
+          const let begin = reinterpret_cast<std::uintptr_t>(range.data());
+          if (range.size() > UINTPTR_MAX - begin) {
+            owner.monitor_begin_ = 0;
+            owner.monitor_end_ = UINTPTR_MAX;
+            break;
+          }
+          owner.monitor_begin_ = std::min(owner.monitor_begin_, begin);
+          owner.monitor_end_ =
+              std::max(owner.monitor_end_, begin + range.size());
+        }
+    }
 
     monitoring_scope(const monitoring_scope &) = delete;
     fn operator=(const monitoring_scope &) -> monitoring_scope & = delete;
 
-    inline ~monitoring_scope() { owner_.monitor_ = previous_; }
+    inline ~monitoring_scope() {
+      owner_.monitor_ = previous_;
+      owner_.monitor_begin_ = previous_begin_;
+      owner_.monitor_end_ = previous_end_;
+    }
   };
 
   [[nodiscard]] inline fn monitor_writes(write_monitor *monitor) noexcept
@@ -615,6 +647,7 @@ private:
   };
 
   write_monitor *monitor_ = nullptr;
+  std::uintptr_t monitor_begin_ = 0, monitor_end_ = UINTPTR_MAX;
   reservation reservation_;
   std::span<std::byte> ram_;
   const backing_policy backing_;
@@ -681,6 +714,9 @@ private:
         return;
       }
     }
+    if (monitor_->stability == range_stability::stable &&
+        (end <= monitor_begin_ || begin >= monitor_end_))
+      return;
     for (const let range : monitor_->ranges) {
       const let code = reinterpret_cast<std::uintptr_t>(range.data());
       if (begin < code + range.size() && code < begin + size) {

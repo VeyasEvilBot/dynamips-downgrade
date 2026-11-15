@@ -173,7 +173,7 @@ public:
         branch_pc_(other.branch_pc_), start_pc_(other.start_pc_),
         instructions_(other.instructions_),
         guards_writes_(other.guards_writes_), simple_(other.simple_),
-        regions_(std::move(other.regions_)) {}
+        count_entry_(other.count_entry_), regions_(std::move(other.regions_)) {}
 
   fn operator=(compiled_block &&other) noexcept -> compiled_block & {
     if (this != &other) {
@@ -190,6 +190,7 @@ public:
       instructions_ = other.instructions_;
       guards_writes_ = other.guards_writes_;
       simple_ = other.simple_;
+      count_entry_ = other.count_entry_;
       regions_ = std::move(other.regions_);
     }
     return *this;
@@ -231,9 +232,11 @@ public:
   execute(execution_session &session,
           std::span<const std::span<const std::byte>> code = {},
           std::uint64_t budget = UINT64_MAX, std::uint32_t blocks = 1,
-          std::uint64_t cycle_limit = UINT64_MAX) const noexcept
-      -> std::expected<execution_result, execution_error> {
-    return execute_session<true>(session, code, budget, blocks, cycle_limit);
+          std::uint64_t cycle_limit = UINT64_MAX,
+          memory::range_stability ranges = memory::range_stability::dynamic)
+      const noexcept -> std::expected<execution_result, execution_error> {
+    return execute_session<true>(session, code, budget, blocks, cycle_limit,
+                                 ranges);
   }
 
 private:
@@ -242,7 +245,9 @@ private:
   execute_session(execution_session &session,
                   std::span<const std::span<const std::byte>> code,
                   std::uint64_t budget, std::uint32_t blocks,
-                  std::uint64_t cycle_limit) const noexcept
+                  std::uint64_t cycle_limit,
+                  memory::range_stability ranges =
+                      memory::range_stability::dynamic) const noexcept
       -> std::expected<execution_result, execution_error> {
     let &context = session.context_;
     const let state = session.state_;
@@ -265,7 +270,11 @@ private:
     if (simple_)
       return execution_result{entry_(state.data(), nullptr), instructions_,
                               exit_reason::completed, 1, 0};
+    if (count_entry_)
+      return execution_result{entry_(state.data(), &context), 1,
+                              exit_reason::completed, 1, 0};
     context.writes.ranges = code;
+    context.writes.stability = ranges;
     context.executed_slots = 0;
     context.instruction_base = 0;
     context.effect_prefix = 0;
@@ -571,12 +580,14 @@ private:
                  bool uses_hilo, bool uses_cop1,
                  std::optional<std::uint64_t> branch_pc, std::uint64_t start_pc,
                  std::uint32_t instructions, bool guards_writes,
-                 std::vector<trace_region> regions, bool simple) noexcept
+                 std::vector<trace_region> regions, bool simple,
+                 bool count_entry = false) noexcept
       : runtime_(std::move(runtime)), entry_(entry), slots_(slots),
         uses_memory_(uses_memory), uses_cop0_(uses_cop0), uses_hilo_(uses_hilo),
         uses_cop1_(uses_cop1), branch_pc_(branch_pc), start_pc_(start_pc),
         instructions_(instructions), guards_writes_(guards_writes),
-        simple_(simple), regions_(std::move(regions)) {}
+        simple_(simple), count_entry_(count_entry),
+        regions_(std::move(regions)) {}
 
   std::shared_ptr<asmjit::JitRuntime> runtime_;
   entry_point entry_;
@@ -590,6 +601,7 @@ private:
   std::uint32_t instructions_;
   bool guards_writes_;
   bool simple_;
+  bool count_entry_;
   std::vector<trace_region> regions_;
 
   fn reset() noexcept -> void {
@@ -616,25 +628,70 @@ public:
     return compile_trace(std::span{&block, 1}, scratch, guard_writes, false);
   }
 
-  [[nodiscard]] fn compile_trace(std::span<const ir::block> blocks,
-                                  std::pmr::memory_resource &scratch,
-                                  bool guard_writes = true,
-                                  bool fuse = true) const noexcept
+  [[nodiscard]] fn compile_trace(
+      std::span<const ir::block> blocks, std::pmr::memory_resource &scratch,
+      bool guard_writes = true, bool fuse = true, bool path_only = false,
+      std::optional<std::size_t> path_backedge = std::nullopt) const noexcept
       -> std::expected<compiled_block, error> {
     if (!runtime_ || runtime_->environment().arch() != asmjit::Arch::kX64)
       return std::unexpected(error{error_code::unavailable});
     if (blocks.empty() || blocks.size() > 64 || (!fuse && blocks.size() != 1))
+      return std::unexpected(error{error_code::invalid_ir});
+    if (path_backedge &&
+        (!fuse || !path_only || *path_backedge >= blocks.size()))
       return std::unexpected(error{error_code::invalid_ir});
     std::uint32_t trace_words = 0;
     for (const let &block : blocks) {
       if (let valid = block.verify(); !valid)
         return std::unexpected(
             error{error_code::invalid_ir, valid.error().node_index});
-      if (fuse && (block.info().instruction_count > 65 - trace_words ||
-                   block.info().start_pc !=
-                       blocks.front().info().start_pc + trace_words * 4))
+      if (fuse && (!block.info().instruction_count ||
+                   block.info().instruction_count > 256 - trace_words ||
+                   block.info().start_pc % 4 ||
+                   block.info().instruction_count >
+                       (UINT64_MAX - block.info().start_pc) / 4))
         return std::unexpected(error{error_code::invalid_ir});
       trace_words += block.info().instruction_count;
+    }
+
+    if (fuse && !path_only)
+      for (std::size_t i = 0; i < blocks.size(); i++)
+        for (std::size_t j = 0; j < i; j++) {
+          const let &left = blocks[i].info();
+          const let &right = blocks[j].info();
+          if (left.start_pc < right.start_pc + right.instruction_count * 4 &&
+              right.start_pc < left.start_pc + left.instruction_count * 4)
+            return std::unexpected(error{error_code::invalid_ir});
+        }
+
+    bool count_entry = !fuse && blocks.size() == 1 &&
+                       blocks.front().info().instruction_count == 1 &&
+                       !blocks.front().branch() && !blocks.front().jump() &&
+                       !blocks.front().indirect();
+    if (count_entry) {
+      std::size_t reads = 0;
+      for (const let &node : blocks.front().nodes()) {
+        if (node.source_index != 0) {
+          count_entry = false;
+          break;
+        }
+        switch (node.op) {
+        case ir::opcode::read_cop0:
+        case ir::opcode::read_cop0_64:
+          reads++;
+          count_entry = count_entry && node.slot.index == 9;
+          break;
+        case ir::opcode::constant:
+        case ir::opcode::alias:
+        case ir::opcode::sign_extend32:
+        case ir::opcode::write_state:
+          break;
+        default:
+          count_entry = false;
+          break;
+        }
+      }
+      count_entry = count_entry && reads == 1;
     }
 
     const let failure = [](asmjit::Error code, std::size_t index) {
@@ -2091,15 +2148,51 @@ public:
                        node.op == ir::opcode::tlb_operation ||
                        node.op == ir::opcode::cache_index;
               });
-          if (!cpu_exit && !block.indirect()) {
+          if (!cpu_exit) {
+            const let ordered_successor = region_index + 1 < blocks.size()
+                                              ? region_index + 1
+                                              : path_backedge.value_or(0);
             const let target_index =
                 [&](std::uint64_t pc) -> std::optional<std::size_t> {
+              if (path_only) {
+                const let target = ordered_successor;
+                return blocks[target].info().start_pc == pc
+                           ? std::optional{target}
+                           : std::nullopt;
+              }
               for (std::size_t target = 0; target < blocks.size(); target++)
                 if (blocks[target].info().start_pc == pc)
                   return target;
               return std::nullopt;
             };
-            if (const let *branch = block.branch()) {
+            if (const let *jump = block.indirect()) {
+              const let target = operand(jump->target);
+              if (!target)
+                return failure(target.error(), block.nodes().size());
+              const let first_candidate = path_only ? ordered_successor : 0;
+              const let candidate_limit =
+                  path_only ? first_candidate + 1 : blocks.size();
+              for (std::size_t candidate = first_candidate;
+                   candidate < candidate_limit; candidate++) {
+                const let pc = blocks[candidate].info().start_pc;
+                const let low =
+                    std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(pc));
+                if (static_cast<std::uint64_t>(std::int64_t{low}) == pc) {
+                  if (const let e = output.cmp(*target, asmjit::Imm{low}))
+                    return failure(e, 0);
+                } else {
+                  const let expected = output.newUInt64();
+                  if (errors.code)
+                    return failure(errors.code, 0);
+                  if (const let e = output.mov(expected, asmjit::Imm{pc}))
+                    return failure(e, 0);
+                  if (const let e = output.cmp(*target, expected))
+                    return failure(e, 0);
+                }
+                if (const let e = output.je(labels[candidate]))
+                  return failure(e, 0);
+              }
+            } else if (const let *branch = block.branch()) {
               const let taken = target_index(branch->target);
               const let fallthrough = target_index(block.next_pc());
               if (taken || fallthrough) {
@@ -2219,7 +2312,8 @@ public:
                             !fuse && !uses_memory && !uses_cop0 && !uses_hilo &&
                                 !uses_cop1 &&
                                 !(blocks.front().branch() &&
-                                  blocks.front().branch()->annul_not_taken)};
+                                  blocks.front().branch()->annul_not_taken),
+                            count_entry};
     } catch (const std::bad_alloc &) {
       return std::unexpected(error{error_code::out_of_memory});
     }

@@ -101,29 +101,19 @@ The CPU MMU translation callback explicitly preserves guest state. Exact decoded
 Count-wait loops can execute in batches bounded by the existing instruction,
 block and Compare limits; other instruction streams retain the ordinary tiers.
 Speculative discovery requires a guest-state-preserving translation contract.
+Hot ordered paths can include nested calls and guarded returns, with exact source
+validation across physical aliases and repeated guest PCs. Paths are bounded by
+32 blocks, 256 words and four translated pages; native execution retains the existing
+instruction, block and Compare limits. Dispatcher-owned code descriptors use an
+explicit stable-range contract; general callers retain live descriptor checks.
 
 
-
-Before the MMU/exception refactor, seven alternating process starts per core on
-one Linux amd64 host using the
-same IOS 12.4(24)T5 image and CPU 2 measured median launch-to-banner times of
-1.026 s for the new core and 1.111 s for legacy Dynamips (7.7% less time).
-The previous rewrite checkpoint measured 2.89 s. These are host-specific boot
-milestone measurements, not measurements of sustained execution or networking.
-A repeat at the MMU/exception checkpoint measured 1.459 s for this core,
-1.255 s for the preceding tiered core and 1.108 s for legacy (seven starts per
-binary, same image and CPU). That correctness checkpoint regressed boot
-performance; the earlier speed lead is not a claim about this revision.
-A three-run, CPU-pinned comparison of this CLI stack measured median launch to
-`Router>` of 192.8 s before the polling fix, 46.1 s after, and 16.1 s for legacy.
-Median banner-to-prompt times were 186.4 s, 44.9 s and 14.7 s respectively.
-This reduces the observed startup delay by about 76%; legacy remains faster.
-The shared host had variable load, so these are checkpoint observations, not a
-general throughput claim. Guest instruction accounting and Count timing are unchanged.
-A subsequent three-round comparison, reversing core order each round, measured
-44.929 s for the parent revision, 41.104 s with dispatch/code-version fast paths,
-and 14.164 s for legacy. This is an 8.5% reduction from the parent at the same
-prompt checkpoint; the goal of beating legacy remains unmet.
+A CPU-pinned screen using the same IOS 12.4(24)T5 image measured median launch to
+`Router>` of 33.800 s for the parent and 27.149 s with bounded paths (two paired
+starts per core, about 20% less time). Legacy reached the same prompt in 14.220 s
+in one reference start. These are host-specific startup checkpoints; the goal of
+beating legacy remains unmet. Count timing and device-service boundaries are
+unchanged. This does not establish sustained throughput or networking performance.
 See `benchmarks/README.md` for reproduction commands.
 
 Unsupported operations report typed failures. Reaching the banner does not
